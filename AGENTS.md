@@ -30,6 +30,8 @@ node server.js       # start server (PORT defaults to 3000)
 docker-compose up -d --build  # or via Docker
 ```
 
+On Windows, prefer using `plink` if SSH auth with the default Git/OpenSSH setup is unreliable in your environment.
+
 ## Conventions
 
 - ES modules (`"type": "module"` in package.json) — use `import`, not `require`.
