@@ -8,19 +8,21 @@ MCP (Model Context Protocol) server that proxies XWiki REST API access. Express-
 
 - **Single-file server** (`server.js`) — all logic lives here: tool definitions, XWiki API calls, MCP protocol handling, SSE session management.
 - **Transport**: HTTP (not stdio). Designed to run as a hosted service (Docker or bare Node).
-- **Auth model (current)**: Global credentials via `XWIKI_URL`, `XWIKI_USERNAME`, `XWIKI_PASSWORD` env vars — shared across all sessions.
+- **Target auth model**: Proper remote MCP with OAuth. Users authenticate via browser/SSO and the server executes XWiki requests under the real user session, not a shared global account.
 
-### Target: User-Based Access
+### Target: Remote MCP + XWiki SSO
 
-The `hosted` branch introduces per-user authentication so each MCP client authenticates with its own XWiki credentials rather than sharing a single global account.
+This repo should move toward per-user authentication based on MCP OAuth and existing XWiki SSO instead of Basic Auth passthrough.
 
 Key design considerations:
-- Credentials should come from the MCP client (e.g., via `initialize` params, HTTP headers, or a token exchange) — NOT from server env vars.
-- Each `callTool` invocation must use the requesting user's credentials.
-- SSE sessions (`sessions` Map) must track per-session auth context.
-- The `/mcp` JSON-RPC endpoint must extract user credentials from the request (e.g., `Authorization` header or session token).
-- Avoid storing plaintext passwords in memory longer than the request lifecycle.
-- Consider supporting both Basic Auth passthrough and token-based auth (XWiki supports both).
+- The MCP server itself is the authenticated remote endpoint. Do not assume MCP clients send raw XWiki credentials.
+- XWiki uses SSO/OIDC via Authentik. Browser-based login is the expected UX.
+- Per-user XWiki permissions are required. Shared backend credentials are not an acceptable long-term auth model.
+- `callTool` should execute with per-user session context, not global process auth.
+- SSE sessions (`sessions` map) must stay bound to the authenticated user session.
+- Prefer server-side session state over storing plaintext passwords.
+- Design for same-origin deployment behind HAProxy, ideally under `https://xwiki.wus-technik.com/mcp/`.
+- Keep the implementation friendly to standard remote MCP clients and possible later OpenWebUI usage.
 
 ## Build & Run
 
@@ -38,8 +40,11 @@ On Windows, prefer using `plink` if SSH auth with the default Git/OpenSSH setup 
 - No transpilation or bundler — plain Node.js 20+.
 - XWiki REST API paths follow: `/rest/wikis/{wiki}/spaces/{spacePath}/pages/{pageName}`.
 - Tool definitions follow MCP tool schema (`name`, `description`, `inputSchema`).
+- Keep auth/session code explicit and easy to trace. Hidden global auth state will become a maintenance problem fast.
 
 ## Key Pitfalls
 
 - `NODE_TLS_REJECT_UNAUTHORIZED=0` is set in docker-compose for dev — do NOT carry this to production.
 - XWiki page paths use dot-notation (`Main.WebHome`) but the REST API uses `/spaces/X/pages/Y` — conversion logic is in `callTool`.
+- Do not reintroduce Basic Auth passthrough as the main plan unless requirements change explicitly.
+- Same-origin deployment matters. If the MCP server is not exposed behind the same public XWiki host/path setup, the SSO/session design changes.
