@@ -8,6 +8,16 @@ MCP (Model Context Protocol) server for interacting with XWiki instances. This s
 - **Page Reading**: Get the full content of any XWiki page
 - **Page Creation/Update**: Create or update pages in XWiki using XWiki syntax
 
+## 🔐 Authentication
+
+Login is browser-based via Authentik SSO. MCP clients that support remote MCP OAuth (e.g. Claude Desktop) will open a browser window automatically.
+
+1. Connect your MCP client to `https://xwiki.wus-technik.com/mcp`
+2. The client discovers OAuth endpoints from `/.well-known/oauth-protected-resource`
+3. Your browser opens → Authentik login (skip if already logged in via SSO)
+4. MCP client receives a session token and connects
+5. All XWiki actions run under your real user permissions
+
 ## 📋 Prerequisites
 
 - Docker and Docker Compose installed
@@ -74,6 +84,29 @@ chmod +x setup.sh
 ```
 
 **Note**: Generated certificates (`server.key` and `server.crt`) are in `.gitignore` and will not be uploaded to the repository.
+
+## 🚀 Deployment (HAProxy)
+
+The MCP server must share the same public hostname as XWiki so the browser's XWiki session cookie is present on MCP requests.
+
+```
+frontend https-in
+  bind *:443 ssl crt /etc/ssl/certs/xwiki.pem
+  acl is_mcp path_beg /mcp/
+  use_backend mcp_backend if is_mcp
+  default_backend xwiki_backend
+
+backend mcp_backend
+  option forwardfor
+  http-request set-header X-Forwarded-Host %[req.hdr(Host)]
+  http-request set-header X-Forwarded-Proto https
+  server mcp 127.0.0.1:3000
+
+backend xwiki_backend
+  server xwiki 127.0.0.1:8080
+```
+
+Preserve `Host` header so OAuth redirect URIs and callback URLs resolve correctly.
 
 ## 📡 Endpoints
 

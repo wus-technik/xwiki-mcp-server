@@ -2,49 +2,69 @@
 
 ## Overview
 
-MCP (Model Context Protocol) server that proxies XWiki REST API access. Express-based HTTP server exposing JSON-RPC (`/mcp`) and SSE (`/sse` + `/messages`) transports.
+Remote MCP server for XWiki. Exposes JSON-RPC (`/mcp`) and SSE (`/sse` + `/messages`) transports with OAuth 2.1 authentication. Each user authenticates via browser (Authentik/SSO) and all XWiki API calls run under that user's real session.
 
 ## Architecture
 
-- **Single-file server** (`server.js`) — all logic lives here: tool definitions, XWiki API calls, MCP protocol handling, SSE session management.
-- **Transport**: HTTP (not stdio). Designed to run as a hosted service (Docker or bare Node).
-- **Target auth model**: Proper remote MCP with OAuth. Users authenticate via browser/SSO and the server executes XWiki requests under the real user session, not a shared global account.
+- **Entry**: `server.js` → `src/app.js` (`createApp()`)
+- **Auth**: OAuth 2.1 BFF — MCP server is both AS (for MCP clients) and OIDC client (to Authentik)
+- **Session store**: in-memory map `sessionId → { userId, xwikiCookie, expiresAt }`
+- **XWiki auth**: per-user session cookie (captured at OAuth callback, same-origin)
+- **Transport**: HTTP (not stdio). Runs behind HAProxy at `/mcp/` under `xwiki.wus-technik.com`
 
-### Target: Remote MCP + XWiki SSO
+### OAuth Flow
 
-This repo should move toward per-user authentication based on MCP OAuth and existing XWiki SSO instead of Basic Auth passthrough.
+```
+MCP Client → /oauth/authorize (PKCE)
+  → Server stores pending state
+  → Redirect to Authentik
+User authenticates in browser (SSO transparent if already logged in)
+Authentik → /oauth/callback?code=...
+  → Server exchanges code with Authentik
+  → Server captures XWiki session cookie from request (same-origin)
+  → Server creates MCP session, issues one-time auth code
+  → Redirect to MCP client
+MCP Client → /oauth/token (code + PKCE verifier)
+  → Server issues signed JWT (payload: userId, sessionId)
+MCP Client → /mcp with Authorization: Bearer <jwt>
+  → Auth middleware validates JWT, loads session
+  → Tool calls use session.xwikiCookie for XWiki REST
+```
 
-Key design considerations:
-- The MCP server itself is the authenticated remote endpoint. Do not assume MCP clients send raw XWiki credentials.
-- XWiki uses SSO/OIDC via Authentik. Browser-based login is the expected UX.
-- Per-user XWiki permissions are required. Shared backend credentials are not an acceptable long-term auth model.
-- `callTool` should execute with per-user session context, not global process auth.
-- SSE sessions (`sessions` map) must stay bound to the authenticated user session.
-- Prefer server-side session state over storing plaintext passwords.
-- Design for same-origin deployment behind HAProxy, ideally under `https://xwiki.wus-technik.com/mcp/`.
-- Keep the implementation friendly to standard remote MCP clients and possible later OpenWebUI usage.
+### Discovery endpoints
+
+- `GET /.well-known/oauth-protected-resource` — points MCP clients to this server as AS
+- `GET /.well-known/oauth-authorization-server` — AS metadata (authorize + token endpoints)
 
 ## Build & Run
 
 ```bash
-npm install          # install deps
-node server.js       # start server (PORT defaults to 3000)
-docker-compose up -d --build  # or via Docker
+npm install
+node server.js
+
+docker-compose up -d --build
 ```
 
-On Windows, prefer using `plink` if SSH auth with the default Git/OpenSSH setup is unreliable in your environment.
+Required env vars (see docker-compose.yml for full list):
+- `XWIKI_URL` — XWiki base URL
+- `AUTHENTIK_ISSUER` — Authentik base URL (e.g. `https://auth.example.com`)
+- `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET` — Authentik OIDC application credentials
+- `OAUTH_REDIRECT_URI` — this server's callback URL (e.g. `https://xwiki.example.com/mcp/oauth/callback`)
+- `MCP_BASE_URL` — public base URL of this server (e.g. `https://xwiki.example.com/mcp`)
+- `SESSION_SECRET` — secret for signing JWT access tokens (min 32 chars, required in production)
 
 ## Conventions
 
-- ES modules (`"type": "module"` in package.json) — use `import`, not `require`.
-- No transpilation or bundler — plain Node.js 20+.
-- XWiki REST API paths follow: `/rest/wikis/{wiki}/spaces/{spacePath}/pages/{pageName}`.
-- Tool definitions follow MCP tool schema (`name`, `description`, `inputSchema`).
-- Keep auth/session code explicit and easy to trace. Hidden global auth state will become a maintenance problem fast.
+- ES modules (`"type": "module"`) — `import`, not `require`
+- No bundler — plain Node.js 20+
+- XWiki REST: `/rest/wikis/{wiki}/spaces/{spacePath}/pages/{pageName}`
+- Tool definitions follow MCP tool schema
+- Auth/session code is explicit and traceable — no hidden global state
 
 ## Key Pitfalls
 
-- `NODE_TLS_REJECT_UNAUTHORIZED=0` is set in docker-compose for dev — do NOT carry this to production.
-- XWiki page paths use dot-notation (`Main.WebHome`) but the REST API uses `/spaces/X/pages/Y` — conversion logic is in `callTool`.
-- Do not reintroduce Basic Auth passthrough as the main plan unless requirements change explicitly.
-- Same-origin deployment matters. If the MCP server is not exposed behind the same public XWiki host/path setup, the SSO/session design changes.
+- `NODE_TLS_REJECT_UNAUTHORIZED=0` is dev-only — never in production
+- `SESSION_SECRET` must be set in production; a missing value triggers a console warning but still works in dev
+- XWiki form token (`XWiki-Form-Token` header) is required for write operations — fetched via GET before PUT
+- Same-origin deployment is required for session cookie capture to work: MCP server must be behind the same hostname as XWiki
+- Do not log `req.headers.cookie`, bearer tokens, or any session secrets

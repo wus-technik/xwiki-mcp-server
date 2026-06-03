@@ -8,11 +8,15 @@ services:
       - "3000:3000"
     environment:
       - PORT=3000
-      - MCP_MODE=http
-      - XWIKI_URL=${XWIKI_URL:-}
-      - XWIKI_USERNAME=${XWIKI_USERNAME:-}
-      - XWIKI_PASSWORD=${XWIKI_PASSWORD:-}
+      - XWIKI_URL=${XWIKI_URL}
       - XWIKI_WIKI=${XWIKI_WIKI:-xwiki}
-      - NODE_TLS_REJECT_UNAUTHORIZED=${NODE_TLS_REJECT_UNAUTHORIZED:-0}
+      - AUTHENTIK_ISSUER=${AUTHENTIK_ISSUER}
+      - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID}
+      - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET}
+      - OAUTH_REDIRECT_URI=${OAUTH_REDIRECT_URI}
+      - MCP_BASE_URL=${MCP_BASE_URL}
+      - SESSION_SECRET=${SESSION_SECRET}
+      - NODE_ENV=${NODE_ENV:-production}
+      # Dev only — do NOT set to 0 in production
+      # - NODE_TLS_REJECT_UNAUTHORIZED=0
     restart: unless-stopped
-
