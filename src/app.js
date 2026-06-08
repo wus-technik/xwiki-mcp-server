@@ -35,7 +35,14 @@ export function createApp(overrides = {}) {
   app.use(express.urlencoded({ extended: false }));
   app.use(cookieParser());
 
-  app.use(createOAuthRouter({
+  const authMiddleware = createAuthMiddleware({
+    sessionSecret: cfg.sessionSecret,
+    mcpBaseUrl: cfg.mcpBaseUrl,
+  });
+
+  const mcpRouter = express.Router();
+
+  mcpRouter.use(createOAuthRouter({
     mcpBaseUrl: cfg.mcpBaseUrl,
     authentikIssuer: cfg.authentikIssuer,
     oauthClientId: cfg.oauthClientId,
@@ -44,12 +51,7 @@ export function createApp(overrides = {}) {
     sessionSecret: cfg.sessionSecret,
   }));
 
-  const authMiddleware = createAuthMiddleware({
-    sessionSecret: cfg.sessionSecret,
-    mcpBaseUrl: cfg.mcpBaseUrl,
-  });
-
-  app.post("/mcp", authMiddleware, async (req, res) => {
+  mcpRouter.post("/", authMiddleware, async (req, res) => {
     const { method, params, id } = req.body;
     const sessionCtx = req.mcpSession;
 
@@ -72,15 +74,17 @@ export function createApp(overrides = {}) {
     res.json({ jsonrpc: "2.0", id, result });
   });
 
-  app.use(createSseRouter({
+  mcpRouter.use(createSseRouter({
     sessionSecret: cfg.sessionSecret,
     mcpBaseUrl: cfg.mcpBaseUrl,
     xwikiClient,
   }));
 
-  app.get("/health", (_req, res) => {
+  mcpRouter.get("/health", (_req, res) => {
     res.json({ status: "ok", xwiki: cfg.xwikiUrl ? "configured" : "not configured" });
   });
+
+  app.use("/mcp", mcpRouter);
 
   return app;
 }
