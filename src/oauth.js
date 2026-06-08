@@ -112,9 +112,10 @@ export function createOAuthHandlers(cfg) {
       return res.status(502).send("Failed to complete authentication. Please try again.");
     }
 
-    // Redirect same-site to /oauth/complete so the browser includes the XWiki session
-    // cookie on that request. A cross-site redirect (Authentik → here) blocks SameSite
-    // cookies, but a same-site hop (here → /oauth/complete) delivers them.
+    // Redirect through XWiki's SSO login to establish a XWiki session before /oauth/complete.
+    // The browser has no JSESSIONID yet (Authentik session ≠ XWiki session). XWiki's
+    // logincheck action detects the active Authentik SSO session, creates a JSESSIONID,
+    // then follows xredirect to /oauth/complete — which captures the real XWiki cookie.
     const pendingId = randomUUID();
     storePendingCompletion(pendingId, {
       userId,
@@ -122,7 +123,9 @@ export function createOAuthHandlers(cfg) {
       redirectUri: authData.redirect_uri,
       clientState: authData.clientState,
     });
-    res.redirect(`${mcpBaseUrl}/oauth/complete?t=${pendingId}`);
+    const xwikiOrigin = new URL(mcpBaseUrl).origin;
+    const completeUrl = `/mcp/oauth/complete?t=${pendingId}`;
+    res.redirect(`${xwikiOrigin}/bin/logincheck/XWiki/XWikiLogin?xredirect=${encodeURIComponent(completeUrl)}`);
   };
 
   const complete = (req, res) => {
