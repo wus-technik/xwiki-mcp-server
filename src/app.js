@@ -46,6 +46,8 @@ export function createApp(overrides = {}) {
     sessionSecret: cfg.sessionSecret,
   };
   const h = createOAuthHandlers(oauthCfg);
+  app.get("/.well-known/oauth-protected-resource", h.resourceMetadata);
+  app.get("/.well-known/oauth-authorization-server", h.asMetadata);
   app.post("/register", h.register);
   app.get("/authorize", h.authorize);
   app.post("/token", h.token);
