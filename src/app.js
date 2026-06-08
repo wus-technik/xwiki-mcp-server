@@ -1,5 +1,6 @@
 import express from "express";
 import cookieParser from "cookie-parser";
+import { randomUUID } from "node:crypto";
 import {
   XWIKI_URL, XWIKI_WIKI,
   OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI,
@@ -38,6 +39,16 @@ export function createApp(overrides = {}) {
   const authMiddleware = createAuthMiddleware({
     sessionSecret: cfg.sessionSecret,
     mcpBaseUrl: cfg.mcpBaseUrl,
+  });
+
+  // Claude Code constructs registration URL as origin+/register, ignoring the /mcp base path.
+  app.post("/register", (req, res) => {
+    res.status(201).json({
+      ...req.body,
+      client_id: randomUUID(),
+      client_id_issued_at: Math.floor(Date.now() / 1000),
+      client_secret_expires_at: 0,
+    });
   });
 
   const mcpRouter = express.Router();
