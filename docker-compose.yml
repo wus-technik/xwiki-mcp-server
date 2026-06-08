@@ -6,17 +6,32 @@ services:
     container_name: mcp-xwiki
     ports:
       - "3000:3000"
+    extra_hosts:
+      # Required: MCP container needs to resolve Authentik for token exchange
+      - sso.wus-technik.com:10.1.15.1
     environment:
       - PORT=3000
-      - XWIKI_URL=${XWIKI_URL}
+      # Use internal Docker hostname — join the xwiki stack network below
+      - XWIKI_URL=${XWIKI_URL:-http://xwiki-postgres-tomcat-web:8080}
       - XWIKI_WIKI=${XWIKI_WIKI:-xwiki}
       - AUTHENTIK_ISSUER=${AUTHENTIK_ISSUER}
       - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID}
       - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET}
+      # Must include /mcp/ prefix — this URL goes through HAProxy
       - OAUTH_REDIRECT_URI=${OAUTH_REDIRECT_URI}
       - MCP_BASE_URL=${MCP_BASE_URL}
       - SESSION_SECRET=${SESSION_SECRET}
       - NODE_ENV=${NODE_ENV:-production}
       # Dev only — do NOT set to 0 in production
       # - NODE_TLS_REJECT_UNAUTHORIZED=0
+    networks:
+      - stack
     restart: unless-stopped
+
+networks:
+  stack:
+    # Join the existing XWiki stack network so the container can reach
+    # xwiki-postgres-tomcat-web:8080 directly without going through HAProxy.
+    # The network name may vary — check with: docker network ls | grep xwiki
+    external: true
+    name: xwiki_stack

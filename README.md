@@ -92,14 +92,19 @@ The MCP server must share the same public hostname as XWiki so the browser's XWi
 ```
 frontend https-in
   bind *:443 ssl crt /etc/ssl/certs/xwiki.pem
-  acl is_mcp path_beg /mcp/
-  use_backend mcp_backend if is_mcp
+  # Match both /mcp (exact — the JSON-RPC endpoint) and /mcp/* (SSE, OAuth, discovery)
+  acl is_mcp     path     /mcp
+  acl is_mcp_sub path_beg /mcp/
+  use_backend mcp_backend if is_mcp OR is_mcp_sub
   default_backend xwiki_backend
 
 backend mcp_backend
   option forwardfor
   http-request set-header X-Forwarded-Host %[req.hdr(Host)]
   http-request set-header X-Forwarded-Proto https
+  # Strip the /mcp/ prefix so Express receives clean paths (/sse, /oauth/callback, etc.)
+  # Paths without a trailing slash (i.e. /mcp itself) are passed through unchanged.
+  http-request set-path %[path,regsub(^/mcp/,/)]
   server mcp 127.0.0.1:3000
 
 backend xwiki_backend
@@ -107,6 +112,11 @@ backend xwiki_backend
 ```
 
 Preserve `Host` header so OAuth redirect URIs and callback URLs resolve correctly.
+
+**Required env vars for this setup:**
+- `XWIKI_URL=http://xwiki-postgres-tomcat-web:8080` — use the internal Docker hostname (join the same network)
+- `MCP_BASE_URL=https://xwiki.wus-technik.com/mcp`
+- `OAUTH_REDIRECT_URI=https://xwiki.wus-technik.com/mcp/oauth/callback` — includes the `/mcp/` prefix (goes through HAProxy)
 
 ## 📡 Endpoints
 
