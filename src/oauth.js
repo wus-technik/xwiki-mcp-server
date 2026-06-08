@@ -3,6 +3,23 @@ import { randomUUID, createHash, randomBytes } from "node:crypto";
 import { SignJWT, jwtVerify, decodeJwt } from "jose";
 import { storeAuthState, consumeAuthState, storeAuthCode, consumeAuthCode, createSession, getSession, deleteSession } from "./session-store.js";
 
+// Pending completions: after Authentik callback we redirect same-site to /oauth/complete
+// so the browser includes the XWiki session cookie (SameSite cookies blocked on cross-site redirect).
+const pendingCompletions = new Map();
+const PENDING_TTL = 5 * 60 * 1000;
+
+function storePendingCompletion(id, data) {
+  pendingCompletions.set(id, { ...data, expiresAt: Date.now() + PENDING_TTL });
+}
+
+function consumePendingCompletion(id) {
+  const entry = pendingCompletions.get(id);
+  if (!entry) return null;
+  pendingCompletions.delete(id);
+  if (Date.now() > entry.expiresAt) return null;
+  return entry;
+}
+
 export function createOAuthHandlers(cfg) {
   const {
     mcpBaseUrl,
@@ -95,18 +112,32 @@ export function createOAuthHandlers(cfg) {
       return res.status(502).send("Failed to complete authentication. Please try again.");
     }
 
-    // Capture XWiki session cookie. When deployed at the same origin as XWiki (e.g.
-    // xwiki.example.com/mcp/), the browser's XWiki session cookie is present here.
-    // Empty string if not same-origin or user has no active XWiki session yet —
-    // in that case tool calls will fail with XWikiAuthError and trigger re-auth.
+    // Redirect same-site to /oauth/complete so the browser includes the XWiki session
+    // cookie on that request. A cross-site redirect (Authentik → here) blocks SameSite
+    // cookies, but a same-site hop (here → /oauth/complete) delivers them.
+    const pendingId = randomUUID();
+    storePendingCompletion(pendingId, {
+      userId,
+      codeChallenge: authData.code_challenge,
+      redirectUri: authData.redirect_uri,
+      clientState: authData.clientState,
+    });
+    res.redirect(`${mcpBaseUrl}/oauth/complete?t=${pendingId}`);
+  };
+
+  const complete = (req, res) => {
+    const pending = consumePendingCompletion(req.query.t);
+    if (!pending) return res.status(400).send("Invalid or expired session completion token.");
+
+    // Same-site request — XWiki session cookie is present here.
     const xwikiCookie = req.headers.cookie || "";
-    const sessionId = createSession(userId, xwikiCookie);
+    const sessionId = createSession(pending.userId, xwikiCookie);
 
     const mcpCode = randomUUID();
-    storeAuthCode(mcpCode, sessionId, authData.code_challenge);
+    storeAuthCode(mcpCode, sessionId, pending.codeChallenge);
 
-    const redirectParams = new URLSearchParams({ code: mcpCode, state: authData.clientState });
-    res.redirect(`${authData.redirect_uri}?${redirectParams}`);
+    const redirectParams = new URLSearchParams({ code: mcpCode, state: pending.clientState });
+    res.redirect(`${pending.redirectUri}?${redirectParams}`);
   };
 
   const token = async (req, res) => {
@@ -154,7 +185,7 @@ export function createOAuthHandlers(cfg) {
     res.json({ message: "Logged out." });
   };
 
-  return { resourceMetadata, asMetadata, register, authorize, callback, token, logout };
+  return { resourceMetadata, asMetadata, register, authorize, callback, complete, token, logout };
 }
 
 export function createOAuthRouter(cfg) {
@@ -166,6 +197,7 @@ export function createOAuthRouter(cfg) {
   router.post("/oauth/register", h.register);
   router.get("/oauth/authorize", h.authorize);
   router.get("/oauth/callback", h.callback);
+  router.get("/oauth/complete", h.complete);
   router.post("/oauth/token", h.token);
   router.get("/oauth/logout", h.logout);
 
