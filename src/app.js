@@ -1,12 +1,11 @@
 import express from "express";
 import cookieParser from "cookie-parser";
-import { randomUUID } from "node:crypto";
 import {
   XWIKI_URL, XWIKI_WIKI,
   OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI,
   AUTHENTIK_ISSUER, MCP_BASE_URL, SESSION_SECRET,
 } from "./config.js";
-import { createOAuthRouter } from "./oauth.js";
+import { createOAuthRouter, createOAuthHandlers } from "./oauth.js";
 import { createAuthMiddleware } from "./auth-middleware.js";
 import { createSseRouter } from "./sse-handler.js";
 import { createXWikiClient, XWikiAuthError } from "./xwiki-client.js";
@@ -36,31 +35,29 @@ export function createApp(overrides = {}) {
   app.use(express.urlencoded({ extended: false }));
   app.use(cookieParser());
 
-  const authMiddleware = createAuthMiddleware({
-    sessionSecret: cfg.sessionSecret,
-    mcpBaseUrl: cfg.mcpBaseUrl,
-  });
-
-  // Claude Code constructs registration URL as origin+/register, ignoring the /mcp base path.
-  app.post("/register", (req, res) => {
-    res.status(201).json({
-      ...req.body,
-      client_id: randomUUID(),
-      client_id_issued_at: Math.floor(Date.now() / 1000),
-      client_secret_expires_at: 0,
-    });
-  });
-
-  const mcpRouter = express.Router();
-
-  mcpRouter.use(createOAuthRouter({
+  // Claude Code constructs OAuth URLs as origin+/path, ignoring the /mcp base path.
+  // Mount the real handlers at root so those requests reach the right logic.
+  const oauthCfg = {
     mcpBaseUrl: cfg.mcpBaseUrl,
     authentikIssuer: cfg.authentikIssuer,
     oauthClientId: cfg.oauthClientId,
     oauthClientSecret: cfg.oauthClientSecret,
     oauthRedirectUri: cfg.oauthRedirectUri,
     sessionSecret: cfg.sessionSecret,
-  }));
+  };
+  const h = createOAuthHandlers(oauthCfg);
+  app.post("/register", h.register);
+  app.get("/authorize", h.authorize);
+  app.post("/token", h.token);
+
+  const authMiddleware = createAuthMiddleware({
+    sessionSecret: cfg.sessionSecret,
+    mcpBaseUrl: cfg.mcpBaseUrl,
+  });
+
+  const mcpRouter = express.Router();
+
+  mcpRouter.use(createOAuthRouter(oauthCfg));
 
   mcpRouter.post("/", authMiddleware, async (req, res) => {
     const { method, params, id } = req.body;

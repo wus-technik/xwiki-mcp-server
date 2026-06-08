@@ -3,7 +3,7 @@ import { randomUUID, createHash, randomBytes } from "node:crypto";
 import { SignJWT, jwtVerify, decodeJwt } from "jose";
 import { storeAuthState, consumeAuthState, storeAuthCode, consumeAuthCode, createSession, getSession, deleteSession } from "./session-store.js";
 
-export function createOAuthRouter(cfg) {
+export function createOAuthHandlers(cfg) {
   const {
     mcpBaseUrl,
     authentikIssuer,
@@ -14,18 +14,17 @@ export function createOAuthRouter(cfg) {
   } = cfg;
 
   const jwtSecret = new TextEncoder().encode(sessionSecret || "dev-insecure-secret-change-me");
-  const router = Router();
 
-  router.get("/.well-known/oauth-protected-resource", (_req, res) => {
+  const resourceMetadata = (_req, res) => {
     res.json({
       resource: mcpBaseUrl,
       authorization_servers: [mcpBaseUrl],
       bearer_methods_supported: ["header"],
       scopes_supported: ["openid", "profile", "email"],
     });
-  });
+  };
 
-  router.get("/.well-known/oauth-authorization-server", (_req, res) => {
+  const asMetadata = (_req, res) => {
     res.json({
       issuer: mcpBaseUrl,
       authorization_endpoint: `${mcpBaseUrl}/oauth/authorize`,
@@ -35,18 +34,18 @@ export function createOAuthRouter(cfg) {
       grant_types_supported: ["authorization_code"],
       code_challenge_methods_supported: ["S256"],
     });
-  });
+  };
 
-  router.post("/oauth/register", (req, res) => {
+  const register = (req, res) => {
     res.status(201).json({
       ...req.body,
       client_id: randomUUID(),
       client_id_issued_at: Math.floor(Date.now() / 1000),
       client_secret_expires_at: 0,
     });
-  });
+  };
 
-  router.get("/oauth/authorize", (req, res) => {
+  const authorize = (req, res) => {
     const { response_type, client_id, redirect_uri, state, code_challenge, code_challenge_method } = req.query;
 
     if (response_type !== "code") return res.status(400).json({ error: "unsupported_response_type" });
@@ -66,9 +65,9 @@ export function createOAuthRouter(cfg) {
     });
 
     res.redirect(`${authentikIssuer}/application/o/authorize/?${params}`);
-  });
+  };
 
-  router.get("/oauth/callback", async (req, res) => {
+  const callback = async (req, res) => {
     const { code, state, error } = req.query;
     if (error) return res.status(400).send("Auth error. Please try again.");
 
@@ -108,10 +107,10 @@ export function createOAuthRouter(cfg) {
 
     const redirectParams = new URLSearchParams({ code: mcpCode, state: authData.clientState });
     res.redirect(`${authData.redirect_uri}?${redirectParams}`);
-  });
+  };
 
-  router.post("/oauth/token", async (req, res) => {
-    const { grant_type, code, code_verifier, client_id, redirect_uri } = req.body;
+  const token = async (req, res) => {
+    const { grant_type, code, code_verifier } = req.body;
     if (grant_type !== "authorization_code") {
       return res.status(400).json({ error: "unsupported_grant_type" });
     }
@@ -141,21 +140,34 @@ export function createOAuthRouter(cfg) {
       token_type: "Bearer",
       expires_in: 8 * 3600,
     });
-  });
+  };
 
-  router.get("/oauth/logout", async (req, res) => {
+  const logout = async (req, res) => {
     const auth = req.headers.authorization || "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
-    if (token) {
+    const tok = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+    if (tok) {
       try {
-        const { payload } = await jwtVerify(token, jwtSecret);
-        if (payload.sid) {
-          deleteSession(payload.sid);
-        }
+        const { payload } = await jwtVerify(tok, jwtSecret);
+        if (payload.sid) deleteSession(payload.sid);
       } catch { /* expired or invalid, nothing to clean up */ }
     }
     res.json({ message: "Logged out." });
-  });
+  };
+
+  return { resourceMetadata, asMetadata, register, authorize, callback, token, logout };
+}
+
+export function createOAuthRouter(cfg) {
+  const h = createOAuthHandlers(cfg);
+  const router = Router();
+
+  router.get("/.well-known/oauth-protected-resource", h.resourceMetadata);
+  router.get("/.well-known/oauth-authorization-server", h.asMetadata);
+  router.post("/oauth/register", h.register);
+  router.get("/oauth/authorize", h.authorize);
+  router.get("/oauth/callback", h.callback);
+  router.post("/oauth/token", h.token);
+  router.get("/oauth/logout", h.logout);
 
   return router;
 }
