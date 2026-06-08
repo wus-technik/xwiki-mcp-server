@@ -30,9 +30,19 @@ export function createOAuthRouter(cfg) {
       issuer: mcpBaseUrl,
       authorization_endpoint: `${mcpBaseUrl}/oauth/authorize`,
       token_endpoint: `${mcpBaseUrl}/oauth/token`,
+      registration_endpoint: `${mcpBaseUrl}/oauth/register`,
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code"],
       code_challenge_methods_supported: ["S256"],
+    });
+  });
+
+  router.post("/oauth/register", (req, res) => {
+    res.status(201).json({
+      ...req.body,
+      client_id: randomUUID(),
+      client_id_issued_at: Math.floor(Date.now() / 1000),
+      client_secret_expires_at: 0,
     });
   });
 
