@@ -36,10 +36,14 @@ cd xwiki-mcp-server
 
 2. Configure environment variables by creating a `.env` file:
 ```bash
-XWIKI_URL=https://your-xwiki-instance.com
-XWIKI_USERNAME=your_username
-XWIKI_PASSWORD=your_password
+XWIKI_URL=http://your-xwiki-internal-host:8080
 XWIKI_WIKI=xwiki
+AUTHENTIK_ISSUER=https://your-authentik-instance.com
+OAUTH_CLIENT_ID=your_client_id
+OAUTH_CLIENT_SECRET=your_client_secret
+OAUTH_REDIRECT_URI=https://your-domain.com/mcp/oauth/callback
+MCP_BASE_URL=https://your-domain.com/mcp
+SESSION_SECRET=your_random_secret
 ```
 
 3. Build and run the container:
@@ -49,7 +53,7 @@ docker-compose up -d --build
 
 4. Verify the server is running:
 ```bash
-curl http://localhost:3000/health
+curl https://your-domain.com/mcp/health
 ```
 
 ### Option 2: Local Execution
@@ -61,10 +65,14 @@ npm install
 
 2. Configure environment variables:
 ```bash
-export XWIKI_URL=https://your-xwiki-instance.com
-export XWIKI_USERNAME=your_username
-export XWIKI_PASSWORD=your_password
+export XWIKI_URL=http://your-xwiki-internal-host:8080
 export XWIKI_WIKI=xwiki
+export AUTHENTIK_ISSUER=https://your-authentik-instance.com
+export OAUTH_CLIENT_ID=your_client_id
+export OAUTH_CLIENT_SECRET=your_client_secret
+export OAUTH_REDIRECT_URI=https://your-domain.com/mcp/oauth/callback
+export MCP_BASE_URL=https://your-domain.com/mcp
+export SESSION_SECRET=your_random_secret
 ```
 
 3. Run the server:
@@ -73,17 +81,6 @@ node server.js
 ```
 
 The server will be available at `http://localhost:3000`
-
-## 🔐 SSL Configuration (Optional)
-
-If you need HTTPS, you can use the `setup.sh` script to generate self-signed SSL certificates:
-
-```bash
-chmod +x setup.sh
-./setup.sh --ssl
-```
-
-**Note**: Generated certificates (`server.key` and `server.crt`) are in `.gitignore` and will not be uploaded to the repository.
 
 ## 🚀 Deployment (HAProxy)
 
@@ -224,12 +221,15 @@ To use this MCP server with Cursor or Claude Desktop, add the following configur
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PORT` | Server port | `3000` |
-| `XWIKI_URL` | Your XWiki instance URL | - |
-| `XWIKI_USERNAME` | Username for authentication | - |
-| `XWIKI_PASSWORD` | Password for authentication | - |
+| `XWIKI_URL` | XWiki internal URL (used for REST API calls) | - |
 | `XWIKI_WIKI` | Wiki name | `xwiki` |
-| `MCP_MODE` | MCP operation mode | `http` |
-| `NODE_TLS_REJECT_UNAUTHORIZED` | Disable SSL validation (development only) | `0` |
+| `AUTHENTIK_ISSUER` | Authentik base URL | - |
+| `OAUTH_CLIENT_ID` | Authentik OAuth2 client ID | - |
+| `OAUTH_CLIENT_SECRET` | Authentik OAuth2 client secret | - |
+| `OAUTH_REDIRECT_URI` | OAuth callback URL (must include `/mcp/` prefix if behind HAProxy) | - |
+| `MCP_BASE_URL` | Public base URL of the MCP server | - |
+| `SESSION_SECRET` | Secret for signing JWTs (min 32 chars) | - |
+| `NODE_ENV` | Set to `production` to enforce TLS | - |
 
 ## 📝 Security Notes
 
