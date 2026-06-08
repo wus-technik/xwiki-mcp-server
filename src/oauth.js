@@ -125,7 +125,7 @@ export function createOAuthHandlers(cfg) {
     });
     const xwikiOrigin = new URL(mcpBaseUrl).origin;
     const completeUrl = `/mcp/oauth/complete?t=${pendingId}`;
-    res.redirect(`${xwikiOrigin}/bin/logincheck/XWiki/XWikiLogin?xredirect=${encodeURIComponent(completeUrl)}`);
+    res.redirect(`${xwikiOrigin}/bin/login/XWiki/XWikiLogin?xredirect=${encodeURIComponent(completeUrl)}`);
   };
 
   const complete = (req, res) => {
