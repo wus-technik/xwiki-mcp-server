@@ -131,6 +131,7 @@ export function createOAuthHandlers(cfg) {
 
     // Same-site request — XWiki session cookie is present here.
     const xwikiCookie = req.headers.cookie || "";
+    console.log(`[oauth/complete] userId=${pending.userId} cookie=${xwikiCookie ? xwikiCookie.slice(0, 80) + "…" : "(empty)"}`);
     const sessionId = createSession(pending.userId, xwikiCookie);
 
     const mcpCode = randomUUID();
