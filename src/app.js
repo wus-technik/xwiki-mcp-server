@@ -80,7 +80,10 @@ export function createApp(overrides = {}) {
       return res.json({ jsonrpc: "2.0", id, error: { code: e.code || -32600, message: "Internal error" } });
     }
 
-    if (result === null) return res.json({ jsonrpc: "2.0", id });
+    if (result === null) {
+      if (id === undefined) return res.status(202).end();
+      return res.json({ jsonrpc: "2.0", id });
+    }
     res.json({ jsonrpc: "2.0", id, result });
   });
 
