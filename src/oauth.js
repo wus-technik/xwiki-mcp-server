@@ -134,7 +134,6 @@ export function createOAuthHandlers(cfg) {
 
     // Same-site request — XWiki session cookie is present here.
     const xwikiCookie = req.headers.cookie || "";
-    console.log(`[oauth/complete] userId=${pending.userId} cookie=${xwikiCookie ? xwikiCookie.slice(0, 80) + "…" : "(empty)"}`);
     const sessionId = createSession(pending.userId, xwikiCookie);
 
     const mcpCode = randomUUID();
@@ -166,14 +165,14 @@ export function createOAuthHandlers(cfg) {
 
     const accessToken = await new SignJWT({ sub: session.userId, sid: codeData.sessionId })
       .setProtectedHeader({ alg: "HS256" })
-      .setExpirationTime("8h")
+      .setExpirationTime("7d")
       .setIssuedAt()
       .sign(jwtSecret);
 
     res.json({
       access_token: accessToken,
       token_type: "Bearer",
-      expires_in: 8 * 3600,
+      expires_in: 7 * 24 * 3600,
     });
   };
 

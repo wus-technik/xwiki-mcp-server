@@ -6,7 +6,7 @@ const sessions   = new Map();
 
 const AUTH_STATE_TTL = 10 * 60 * 1000;
 const AUTH_CODE_TTL  = 5 * 60 * 1000;
-const SESSION_TTL    = 8 * 60 * 60 * 1000;
+const SESSION_TTL    = 7 * 24 * 60 * 60 * 1000;
 
 export function storeAuthState(state, data) {
   authStates.set(state, { ...data, createdAt: Date.now() });
