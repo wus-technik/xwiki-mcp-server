@@ -24,9 +24,18 @@ test("callTool search_xwiki calls client.search and returns JSON", async () => {
   const result = await callTool("search_xwiki", { query: "home" }, SESSION, client);
   assert.equal(client.search.mock.calls.length, 1);
   assert.equal(client.search.mock.calls[0].arguments[0], "home");
-  assert.equal(client.search.mock.calls[0].arguments[2], SESSION);
+  assert.deepEqual(client.search.mock.calls[0].arguments[2], { includeHeadings: false });
+  assert.equal(client.search.mock.calls[0].arguments[3], SESSION);
   const parsed = JSON.parse(result);
   assert.equal(parsed[0].title, "Page A");
+});
+
+test("callTool search_xwiki forwards include_headings", async () => {
+  const client = makeClient();
+  await callTool("search_xwiki", { query: "home", limit: 3, include_headings: true }, SESSION, client);
+  assert.equal(client.search.mock.calls[0].arguments[1], 3);
+  assert.deepEqual(client.search.mock.calls[0].arguments[2], { includeHeadings: true });
+  assert.equal(client.search.mock.calls[0].arguments[3], SESSION);
 });
 
 test("callTool get_xwiki_page calls client.getPage", async () => {

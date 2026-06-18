@@ -27,6 +27,38 @@ test("search sends Cookie header and returns mapped results", async () => {
   assert.equal(results[0].title, "Home");
 });
 
+test("search can include parsed headings per result", async () => {
+  const fetcher = mock.fn(async (url) => {
+    if (url.includes("/search?")) {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: async () => ({
+          searchResults: [{ title: "Home", pageName: "WebHome", space: "Main", pageFullName: "Main.WebHome" }],
+        }),
+      };
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: async () => ({
+        title: "Home",
+        content: "= Intro =\nHello\n\n== Hetzner Object Storage ==\nBody\n\n== RustFS ==", author: "alice", modified: "2024-01-01",
+      }),
+    };
+  });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  const results = await client.search("home", 5, { includeHeadings: true }, { xwikiCookie: COOKIE });
+  assert.deepEqual(results[0].headings, [
+    { title: "Intro", level: 1, occurrence: 1 },
+    { title: "Hetzner Object Storage", level: 2, occurrence: 1 },
+    { title: "RustFS", level: 2, occurrence: 1 },
+  ]);
+});
+
 test("getPage returns page fields", async () => {
   const fetcher = mockFetch(200, { title: "Home", content: "Hello", author: "alice", modified: "2024-01-01" });
   const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });

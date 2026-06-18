@@ -10,6 +10,17 @@ export function createXWikiClient({ baseUrl, wiki, fetcher = fetch }) {
     return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
   }
 
+  function normalizePagePath(pagePath) {
+    return String(pagePath || "").replace(/\//g, ".");
+  }
+
+  function getPageEndpoint(pagePath) {
+    const parts = normalizePagePath(pagePath).split(".");
+    const spacePath = parts.slice(0, -1).join("/spaces/");
+    const pageName = parts[parts.length - 1] || "WebHome";
+    return `${baseUrl}/rest/wikis/${wiki}/spaces/${spacePath}/pages/${pageName}`;
+  }
+
   function parseHeadingLine(line) {
     const match = line.match(/^(=+)\s*(.*?)\s*\1\s*$/);
     if (!match) return null;
@@ -17,6 +28,27 @@ export function createXWikiClient({ baseUrl, wiki, fetcher = fetch }) {
       level: match[1].length,
       title: match[2].trim(),
     };
+  }
+
+  function extractHeadings(content) {
+    const lines = String(content || "").split("\n");
+    const occurrences = new Map();
+    const headings = [];
+
+    for (const line of lines) {
+      const parsedHeading = parseHeadingLine(line);
+      if (!parsedHeading) continue;
+      const normalizedTitle = normalizeHeadingName(parsedHeading.title);
+      const occurrence = (occurrences.get(normalizedTitle) || 0) + 1;
+      occurrences.set(normalizedTitle, occurrence);
+      headings.push({
+        title: parsedHeading.title,
+        level: parsedHeading.level,
+        occurrence,
+      });
+    }
+
+    return headings;
   }
 
   function extractSectionByHeading(content, options = {}) {
@@ -86,6 +118,27 @@ export function createXWikiClient({ baseUrl, wiki, fetcher = fetch }) {
     return { options: optionsOrSessionCtx || {}, sessionCtx: sessionCtx || {} };
   }
 
+  function resolveSearchArgs(limitOrOptions = 10, optionsOrSessionCtx = {}, maybeSessionCtx = {}) {
+    if (
+      optionsOrSessionCtx &&
+      typeof optionsOrSessionCtx === "object" &&
+      ("xwikiCookie" in optionsOrSessionCtx || "userId" in optionsOrSessionCtx) &&
+      (!maybeSessionCtx || Object.keys(maybeSessionCtx).length === 0)
+    ) {
+      return {
+        limit: Number.isFinite(limitOrOptions) ? limitOrOptions : 10,
+        options: {},
+        sessionCtx: optionsOrSessionCtx,
+      };
+    }
+
+    return {
+      limit: Number.isFinite(limitOrOptions) ? limitOrOptions : 10,
+      options: optionsOrSessionCtx || {},
+      sessionCtx: maybeSessionCtx || {},
+    };
+  }
+
   function sliceContent(content, options = {}) {
     const includeContent = options.includeContent !== false;
     const normalizedContent = typeof content === "string" ? content : "";
@@ -132,31 +185,45 @@ export function createXWikiClient({ baseUrl, wiki, fetcher = fetch }) {
     return res.headers.get("XWiki-Form-Token") || "";
   }
 
+  async function fetchPageRecord(pagePath, sessionCtx) {
+    const res = await fetcher(getPageEndpoint(pagePath), { headers: cookieHeaders(sessionCtx) });
+    if (res.status === 401) throw new XWikiAuthError("XWiki session expired. Please re-authenticate.");
+    if (res.status === 403) throw new Error("Access denied. Insufficient XWiki permissions.");
+    if (!res.ok) throw new Error(`XWiki page fetch failed: ${res.status}`);
+    return res.json();
+  }
+
   return {
-    async search(query, limit = 10, sessionCtx = {}) {
+    async search(query, limitOrOptions = 10, optionsOrSessionCtx = {}, maybeSessionCtx = {}) {
+      const { limit, options, sessionCtx } = resolveSearchArgs(limitOrOptions, optionsOrSessionCtx, maybeSessionCtx);
       const url = `${baseUrl}/rest/wikis/${wiki}/search?q=${encodeURIComponent(query)}&number=${limit}`;
       const res = await fetcher(url, { headers: cookieHeaders(sessionCtx) });
       if (res.status === 401) throw new XWikiAuthError("XWiki session expired. Please re-authenticate.");
       if (!res.ok) throw new Error(`XWiki search failed: ${res.status}`);
       const data = await res.json();
-      return (data.searchResults || []).map((r) => ({
+      const results = (data.searchResults || []).map((r) => ({
         title: r.title || r.pageName,
         space: r.space,
+        pagePath: r.pageFullName || [r.space, r.pageName].filter(Boolean).join("."),
         url: `${baseUrl}/bin/view/${(r.pageFullName || "").replace(/\./g, "/")}`,
+      }));
+
+      if (options.includeHeadings !== true) {
+        return results.map(({ pagePath, ...result }) => result);
+      }
+
+      return Promise.all(results.map(async ({ pagePath, ...result }) => {
+        const page = await fetchPageRecord(pagePath, sessionCtx);
+        return {
+          ...result,
+          headings: extractHeadings(page.content),
+        };
       }));
     },
 
     async getPage(pagePath, optionsOrSessionCtx = {}, maybeSessionCtx = {}) {
       const { options, sessionCtx } = resolveGetPageArgs(optionsOrSessionCtx, maybeSessionCtx);
-      const parts = pagePath.replace(/\//g, ".").split(".");
-      const spacePath = parts.slice(0, -1).join("/spaces/");
-      const pageName = parts[parts.length - 1] || "WebHome";
-      const url = `${baseUrl}/rest/wikis/${wiki}/spaces/${spacePath}/pages/${pageName}`;
-      const res = await fetcher(url, { headers: cookieHeaders(sessionCtx) });
-      if (res.status === 401) throw new XWikiAuthError("XWiki session expired. Please re-authenticate.");
-      if (res.status === 403) throw new Error("Access denied. Insufficient XWiki permissions.");
-      if (!res.ok) throw new Error(`XWiki page fetch failed: ${res.status}`);
-      const page = await res.json();
+      const page = await fetchPageRecord(pagePath, sessionCtx);
       const section = extractSectionByHeading(page.content, options);
       return {
         title: page.title,
@@ -176,10 +243,7 @@ export function createXWikiClient({ baseUrl, wiki, fetcher = fetch }) {
 
     async createPage(pagePath, title, content, sessionCtx = {}) {
       const formToken = await getFormToken(sessionCtx);
-      const parts = pagePath.replace(/\//g, ".").split(".");
-      const spacePath = parts.slice(0, -1).join("/spaces/");
-      const pageName = parts[parts.length - 1] || "WebHome";
-      const url = `${baseUrl}/rest/wikis/${wiki}/spaces/${spacePath}/pages/${pageName}`;
+      const url = getPageEndpoint(pagePath);
       const xml = `<?xml version="1.0" encoding="UTF-8"?><page xmlns="http://www.xwiki.org"><title>${title}</title><content><![CDATA[${content}]]></content></page>`;
       const headers = {
         ...cookieHeaders(sessionCtx),

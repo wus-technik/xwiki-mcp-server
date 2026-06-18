@@ -144,6 +144,7 @@ Searches for articles in XWiki.
 **Parameters:**
 - `query` (required): Search term
 - `limit` (optional): Maximum number of results (default: 10)
+- `include_headings` (optional): Include parsed XWiki headings for each result so clients can discover exact section names
 
 **Example:**
 ```json
@@ -153,7 +154,8 @@ Searches for articles in XWiki.
     "name": "search_xwiki",
     "arguments": {
       "query": "documentation",
-      "limit": 5
+      "limit": 5,
+      "include_headings": true
     }
   }
 }

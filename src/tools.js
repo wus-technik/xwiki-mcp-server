@@ -9,6 +9,10 @@ export const TOOLS = [
       properties: {
         query: { type: "string", description: "Search query" },
         limit: { type: "number", description: "Max results (default 10)" },
+        include_headings: {
+          type: "boolean",
+          description: "Include parsed page headings for each search result (default false)",
+        },
       },
       required: ["query"],
     },
@@ -62,8 +66,8 @@ export const TOOLS = [
 export async function callTool(name, args, sessionCtx, xwikiClient) {
   try {
     if (name === "search_xwiki") {
-      const { query, limit = 10 } = args;
-      const results = await xwikiClient.search(query, limit, sessionCtx);
+      const { query, limit = 10, include_headings = false } = args;
+      const results = await xwikiClient.search(query, limit, { includeHeadings: include_headings }, sessionCtx);
       return JSON.stringify(results, null, 2);
     }
     if (name === "get_xwiki_page") {

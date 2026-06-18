@@ -147,7 +147,7 @@ test("POST /mcp tools/call search_xwiki passes session context to xwiki client",
 
   let capturedCtx;
   const mockClient = {
-    search: async (query, limit, ctx) => { capturedCtx = ctx; return []; },
+    search: async (query, limit, options, ctx) => { capturedCtx = ctx; return []; },
     getPage: async () => ({}),
     createPage: async () => "",
   };
