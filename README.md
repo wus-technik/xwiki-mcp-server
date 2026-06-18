@@ -164,6 +164,11 @@ Gets the content of an XWiki page.
 
 **Parameters:**
 - `page_path` (required): Page path (e.g., `Main.WebHome` or `Space.Page`)
+- `include_content` (optional): Set to `false` to return only metadata plus content length info
+- `heading` (optional): Return only the section that starts at the matching XWiki heading
+- `heading_occurrence` (optional): 1-based occurrence for duplicate headings, default `1`
+- `content_offset` (optional): Character offset applied after any heading extraction
+- `content_length` (optional): Maximum number of characters to return after any heading extraction
 
 **Example:**
 ```json
@@ -172,7 +177,10 @@ Gets the content of an XWiki page.
   "params": {
     "name": "get_xwiki_page",
     "arguments": {
-      "page_path": "Main.WebHome"
+      "page_path": "Main.WebHome",
+      "heading": "Deployment",
+      "heading_occurrence": 1,
+      "content_length": 500
     }
   }
 }

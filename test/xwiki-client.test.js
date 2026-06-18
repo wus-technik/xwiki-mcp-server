@@ -33,6 +33,79 @@ test("getPage returns page fields", async () => {
   const page = await client.getPage("Main.WebHome", { xwikiCookie: COOKIE });
   assert.equal(page.title, "Home");
   assert.equal(page.content, "Hello");
+  assert.equal(page.totalContentLength, 5);
+  assert.equal(page.contentTruncated, false);
+});
+
+test("getPage can return a section by heading", async () => {
+  const content = [
+    "= Intro =",
+    "hello",
+    "",
+    "== Details ==",
+    "alpha",
+    "",
+    "== Details ==",
+    "beta",
+    "",
+    "= End =",
+    "bye",
+  ].join("\n");
+  const fetcher = mockFetch(200, { title: "Home", content, author: "alice", modified: "2024-01-01" });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  const page = await client.getPage("Main.WebHome", { heading: "Details", headingOccurrence: 2 }, { xwikiCookie: COOKIE });
+  assert.equal(page.headingMatched, "Details");
+  assert.equal(page.headingOccurrence, 2);
+  assert.equal(page.headingLevel, 2);
+  assert.equal(page.content, "== Details ==\nbeta");
+  assert.equal(page.contentTruncated, true);
+  assert.equal(page.totalContentLength, 18);
+  assert.equal(page.sourceContentLength, content.length);
+});
+
+test("getPage can slice content after heading extraction", async () => {
+  const content = [
+    "= Intro =",
+    "hello",
+    "",
+    "== Details ==",
+    "alphabet",
+    "",
+    "= End =",
+    "bye",
+  ].join("\n");
+  const fetcher = mockFetch(200, { title: "Home", content, author: "alice", modified: "2024-01-01" });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  const page = await client.getPage(
+    "Main.WebHome",
+    { heading: "Details", contentOffset: 3, contentLength: 7 },
+    { xwikiCookie: COOKIE },
+  );
+  assert.equal(page.content, "Details");
+  assert.equal(page.contentOffset, 3);
+  assert.equal(page.contentLength, 7);
+  assert.equal(page.totalContentLength, 22);
+  assert.equal(page.sourceContentLength, content.length);
+  assert.equal(page.contentTruncated, true);
+});
+
+test("getPage can omit content while keeping metadata", async () => {
+  const fetcher = mockFetch(200, { title: "Home", content: "Hello", author: "alice", modified: "2024-01-01" });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  const page = await client.getPage("Main.WebHome", { includeContent: false }, { xwikiCookie: COOKIE });
+  assert.equal(page.content, undefined);
+  assert.equal(page.contentLength, 0);
+  assert.equal(page.totalContentLength, 5);
+  assert.equal(page.contentTruncated, true);
+});
+
+test("getPage throws when requested heading is missing", async () => {
+  const fetcher = mockFetch(200, { title: "Home", content: "= Intro =\nHello", author: "alice", modified: "2024-01-01" });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  await assert.rejects(
+    () => client.getPage("Main.WebHome", { heading: "Missing" }, { xwikiCookie: COOKIE }),
+    /Heading not found: Missing/
+  );
 });
 
 test("createPage fetches form token before PUT", async () => {

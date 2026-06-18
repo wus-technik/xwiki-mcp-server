@@ -33,9 +33,35 @@ test("callTool get_xwiki_page calls client.getPage", async () => {
   const client = makeClient();
   const result = await callTool("get_xwiki_page", { page_path: "Main.WebHome" }, SESSION, client);
   assert.equal(client.getPage.mock.calls[0].arguments[0], "Main.WebHome");
-  assert.equal(client.getPage.mock.calls[0].arguments[1], SESSION);
+  assert.deepEqual(client.getPage.mock.calls[0].arguments[1], {
+    includeContent: true,
+    heading: undefined,
+    headingOccurrence: undefined,
+    contentOffset: 0,
+    contentLength: undefined,
+  });
+  assert.equal(client.getPage.mock.calls[0].arguments[2], SESSION);
   const parsed = JSON.parse(result);
   assert.equal(parsed.title, "Page A");
+});
+
+test("callTool get_xwiki_page forwards heading and slice options", async () => {
+  const client = makeClient();
+  await callTool("get_xwiki_page", {
+    page_path: "Main.WebHome",
+    heading: "Details",
+    heading_occurrence: 2,
+    content_offset: 4,
+    content_length: 10,
+    include_content: false,
+  }, SESSION, client);
+  assert.deepEqual(client.getPage.mock.calls[0].arguments[1], {
+    includeContent: false,
+    heading: "Details",
+    headingOccurrence: 2,
+    contentOffset: 4,
+    contentLength: 10,
+  });
 });
 
 test("callTool create_xwiki_page calls client.createPage", async () => {
