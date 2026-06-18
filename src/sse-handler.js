@@ -3,9 +3,9 @@ import { randomUUID } from "node:crypto";
 import { createAuthMiddleware } from "./auth-middleware.js";
 import { handleMcpRequest } from "./mcp-handler.js";
 
-export function createSseRouter({ sessionSecret, mcpBaseUrl = "", xwikiClient }) {
+export function createSseRouter({ sessionSecret, mcpBaseUrl = "", authDebugLogger, xwikiClient }) {
   const router = Router();
-  const authMiddleware = createAuthMiddleware({ sessionSecret, mcpBaseUrl });
+  const authMiddleware = createAuthMiddleware({ sessionSecret, mcpBaseUrl, authDebugLogger });
 
   // sessionId → { res, userId, xwikiCookie }
   const sseSessions = new Map();
@@ -36,7 +36,10 @@ export function createSseRouter({ sessionSecret, mcpBaseUrl = "", xwikiClient })
 
   router.post("/messages", async (req, res) => {
     const sseSession = sseSessions.get(req.query.sessionId);
-    if (!sseSession) return res.status(400).json({ error: "Session not found" });
+    if (!sseSession) {
+      authDebugLogger?.warn("sse_session_not_found", req, { transportSessionId: req.query.sessionId });
+      return res.status(400).json({ error: "Session not found" });
+    }
 
     const { method, params, id } = req.body;
     const sessionCtx = { userId: sseSession.userId, xwikiCookie: sseSession.xwikiCookie };
@@ -46,6 +49,11 @@ export function createSseRouter({ sessionSecret, mcpBaseUrl = "", xwikiClient })
       result = await handleMcpRequest(method, params, sessionCtx, xwikiClient);
     } catch (e) {
       if (e.name === "XWikiAuthError") {
+        authDebugLogger?.warn("xwiki_session_expired", req, {
+          transport: "sse",
+          transportSessionId: req.query.sessionId,
+          userId: sseSession.userId,
+        });
         // Close the SSE stream so the client reconnects and hits auth middleware again
         sseSession.res.write(`event: error\ndata: ${JSON.stringify({ error: "xwiki_session_expired" })}\n\n`);
         sseSession.res.end();

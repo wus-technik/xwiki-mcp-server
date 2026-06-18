@@ -8,6 +8,7 @@ export const OAUTH_REDIRECT_URI = process.env.OAUTH_REDIRECT_URI || "";
 export const AUTHENTIK_ISSUER = (process.env.AUTHENTIK_ISSUER || "").replace(/\/$/, "");
 export const MCP_BASE_URL = (process.env.MCP_BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
 export const SESSION_SECRET = process.env.SESSION_SECRET || "";
+export const AUTH_DEBUG = process.env.AUTH_DEBUG === "1";
 
 if (!SESSION_SECRET) {
   console.warn("[config] SESSION_SECRET not set — using insecure default. Required in production.");

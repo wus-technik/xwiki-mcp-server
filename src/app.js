@@ -3,10 +3,11 @@ import cookieParser from "cookie-parser";
 import {
   XWIKI_URL, XWIKI_WIKI,
   OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI,
-  AUTHENTIK_ISSUER, MCP_BASE_URL, SESSION_SECRET,
+  AUTHENTIK_ISSUER, MCP_BASE_URL, SESSION_SECRET, AUTH_DEBUG,
 } from "./config.js";
 import { createOAuthRouter, createOAuthHandlers } from "./oauth.js";
 import { createAuthMiddleware } from "./auth-middleware.js";
+import { createAuthDebugLogger } from "./auth-debug.js";
 import { createSseRouter } from "./sse-handler.js";
 import { createXWikiClient, XWikiAuthError } from "./xwiki-client.js";
 import { handleMcpRequest } from "./mcp-handler.js";
@@ -22,6 +23,7 @@ export function createApp(overrides = {}) {
     authentikIssuer: AUTHENTIK_ISSUER,
     mcpBaseUrl: MCP_BASE_URL,
     sessionSecret: SESSION_SECRET,
+    authDebug: AUTH_DEBUG,
     ...overrides,
   };
 
@@ -34,6 +36,7 @@ export function createApp(overrides = {}) {
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
   app.use(cookieParser());
+  const authDebugLogger = createAuthDebugLogger(cfg.authDebug);
 
   // Claude Code constructs OAuth URLs as origin+/path, ignoring the /mcp base path.
   // Mount the real handlers at root so those requests reach the right logic.
@@ -55,6 +58,7 @@ export function createApp(overrides = {}) {
   const authMiddleware = createAuthMiddleware({
     sessionSecret: cfg.sessionSecret,
     mcpBaseUrl: cfg.mcpBaseUrl,
+    authDebugLogger,
   });
 
   const mcpRouter = express.Router();
@@ -70,6 +74,10 @@ export function createApp(overrides = {}) {
       result = await handleMcpRequest(method, params, sessionCtx, xwikiClient);
     } catch (e) {
       if (e instanceof XWikiAuthError) {
+        authDebugLogger.warn("xwiki_session_expired", req, {
+          sessionId: req.mcpSession.sessionId,
+          userId: req.mcpSession.userId,
+        });
         deleteSession(req.mcpSession.sessionId);
         res.setHeader(
           "WWW-Authenticate",
@@ -90,6 +98,7 @@ export function createApp(overrides = {}) {
   mcpRouter.use(createSseRouter({
     sessionSecret: cfg.sessionSecret,
     mcpBaseUrl: cfg.mcpBaseUrl,
+    authDebugLogger,
     xwikiClient,
   }));
 
