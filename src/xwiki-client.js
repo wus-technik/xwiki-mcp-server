@@ -5,6 +5,8 @@ export class XWikiAuthError extends Error {
   }
 }
 
+const DEFAULT_SYNTAX = "markdown/1.2";
+
 export function createXWikiClient({ baseUrl, wiki, fetcher = fetch }) {
   function normalizeHeadingName(value) {
     return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
@@ -22,12 +24,23 @@ export function createXWikiClient({ baseUrl, wiki, fetcher = fetch }) {
   }
 
   function parseHeadingLine(line) {
-    const match = line.match(/^(=+)\s*(.*?)\s*\1\s*$/);
-    if (!match) return null;
-    return {
-      level: match[1].length,
-      title: match[2].trim(),
-    };
+    const xwikiMatch = line.match(/^(=+)\s*(.*?)\s*\1\s*$/);
+    if (xwikiMatch) {
+      return {
+        level: xwikiMatch[1].length,
+        title: xwikiMatch[2].trim(),
+      };
+    }
+
+    const markdownMatch = line.match(/^(#{1,6})\s+(.+?)$/);
+    if (markdownMatch) {
+      return {
+        level: markdownMatch[1].length,
+        title: markdownMatch[2].replace(/\s+#+$/, "").trim(),
+      };
+    }
+
+    return null;
   }
 
   function extractHeadings(content) {
@@ -229,6 +242,7 @@ export function createXWikiClient({ baseUrl, wiki, fetcher = fetch }) {
         title: page.title,
         author: page.author,
         modified: page.modified,
+        syntax: page.syntax,
         ...sliceContent(section.content, {
           ...options,
           totalLengthOverride: section.content.length,
@@ -244,7 +258,7 @@ export function createXWikiClient({ baseUrl, wiki, fetcher = fetch }) {
     async createPage(pagePath, title, content, sessionCtx = {}) {
       const formToken = await getFormToken(sessionCtx);
       const url = getPageEndpoint(pagePath);
-      const xml = `<?xml version="1.0" encoding="UTF-8"?><page xmlns="http://www.xwiki.org"><title>${title}</title><content><![CDATA[${content}]]></content></page>`;
+      const xml = `<?xml version="1.0" encoding="UTF-8"?><page xmlns="http://www.xwiki.org"><title>${title}</title><syntax>${DEFAULT_SYNTAX}</syntax><content><![CDATA[${content}]]></content></page>`;
       const headers = {
         ...cookieHeaders(sessionCtx),
         "Content-Type": "application/xml",

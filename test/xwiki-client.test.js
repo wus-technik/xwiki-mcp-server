@@ -60,11 +60,14 @@ test("search can include parsed headings per result", async () => {
 });
 
 test("getPage returns page fields", async () => {
-  const fetcher = mockFetch(200, { title: "Home", content: "Hello", author: "alice", modified: "2024-01-01" });
+  const fetcher = mockFetch(200, {
+    title: "Home", content: "Hello", author: "alice", modified: "2024-01-01", syntax: "markdown/1.2",
+  });
   const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
   const page = await client.getPage("Main.WebHome", { xwikiCookie: COOKIE });
   assert.equal(page.title, "Home");
   assert.equal(page.content, "Hello");
+  assert.equal(page.syntax, "markdown/1.2");
   assert.equal(page.totalContentLength, 5);
   assert.equal(page.contentTruncated, false);
 });
@@ -140,6 +143,29 @@ test("getPage throws when requested heading is missing", async () => {
   );
 });
 
+test("getPage can return a section by heading in Markdown syntax", async () => {
+  const content = [
+    "# Intro",
+    "hello",
+    "",
+    "## Details",
+    "alpha",
+    "",
+    "## Details",
+    "beta",
+    "",
+    "# End",
+    "bye",
+  ].join("\n");
+  const fetcher = mockFetch(200, { title: "Home", content, author: "alice", modified: "2024-01-01" });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  const page = await client.getPage("Main.WebHome", { heading: "Details", headingOccurrence: 2 }, { xwikiCookie: COOKIE });
+  assert.equal(page.headingMatched, "Details");
+  assert.equal(page.headingOccurrence, 2);
+  assert.equal(page.headingLevel, 2);
+  assert.equal(page.content, "## Details\nbeta");
+});
+
 test("createPage fetches form token before PUT", async () => {
   const calls = [];
   const fetcher = mock.fn(async (url, opts) => {
@@ -158,6 +184,24 @@ test("createPage fetches form token before PUT", async () => {
   await client.createPage("Main.TestPage", "Test", "content", { xwikiCookie: COOKIE });
   assert.equal(calls[0].method, "GET");
   assert.equal(calls[1].method, "PUT");
+});
+
+test("createPage sends Markdown as the page syntax by default", async () => {
+  let putBody = "";
+  const fetcher = mock.fn(async (url, opts) => {
+    if (opts?.method === "PUT") {
+      putBody = opts.body;
+      return { ok: true, status: 201, headers: { get: () => null }, text: async () => "" };
+    }
+    return {
+      ok: true, status: 200,
+      headers: { get: (k) => k === "XWiki-Form-Token" ? "tok-abc" : null },
+      json: async () => ({}),
+    };
+  });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  await client.createPage("Main.TestPage", "Test", "content", { xwikiCookie: COOKIE });
+  assert.match(putBody, /<syntax>markdown\/1\.2<\/syntax>/);
 });
 
 test("search throws XWikiAuthError on 401", async () => {

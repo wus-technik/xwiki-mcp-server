@@ -56,7 +56,10 @@ export const TOOLS = [
       properties: {
         page_path: { type: "string", description: "Page path" },
         title: { type: "string", description: "Title" },
-        content: { type: "string", description: "Content in XWiki syntax" },
+        content: {
+          type: "string",
+          description: "Page content in CommonMark Markdown syntax (this wiki's default document syntax)",
+        },
       },
       required: ["page_path", "title", "content"],
     },

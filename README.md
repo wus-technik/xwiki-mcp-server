@@ -6,7 +6,7 @@ MCP (Model Context Protocol) server for interacting with XWiki instances. This s
 
 - **Article Search**: Search pages in XWiki using the search API
 - **Page Reading**: Get the full content of any XWiki page
-- **Page Creation/Update**: Create or update pages in XWiki using XWiki syntax
+- **Page Creation/Update**: Create or update pages in XWiki using CommonMark Markdown (this wiki's default document syntax)
 
 ## 🔐 Authentication
 
@@ -194,7 +194,7 @@ Creates or updates a page in XWiki.
 **Parameters:**
 - `page_path` (required): Page path
 - `title` (required): Page title
-- `content` (required): Content in XWiki syntax
+- `content` (required): Content in CommonMark Markdown syntax (this wiki's default document syntax)
 
 **Example:**
 ```json
