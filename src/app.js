@@ -1,7 +1,7 @@
 import express from "express";
 import cookieParser from "cookie-parser";
 import {
-  XWIKI_URL, XWIKI_WIKI,
+  XWIKI_URL, XWIKI_PUBLIC_URL, XWIKI_WIKI,
   OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI,
   AUTHENTIK_ISSUER, MCP_BASE_URL, SESSION_SECRET, AUTH_DEBUG,
 } from "./config.js";
@@ -16,6 +16,7 @@ import { deleteSession } from "./session-store.js";
 export function createApp(overrides = {}) {
   const cfg = {
     xwikiUrl: XWIKI_URL,
+    xwikiPublicUrl: XWIKI_PUBLIC_URL,
     xwikiWiki: XWIKI_WIKI,
     oauthClientId: OAUTH_CLIENT_ID,
     oauthClientSecret: OAUTH_CLIENT_SECRET,
@@ -29,6 +30,7 @@ export function createApp(overrides = {}) {
 
   const xwikiClient = overrides.xwikiClient || createXWikiClient({
     baseUrl: cfg.xwikiUrl,
+    publicUrl: cfg.xwikiPublicUrl,
     wiki: cfg.xwikiWiki,
   });
 

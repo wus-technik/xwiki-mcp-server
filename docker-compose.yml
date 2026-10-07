@@ -13,6 +13,7 @@ services:
       - PORT=3000
       # Use internal Docker hostname — join the xwiki stack network below
       - XWIKI_URL=${XWIKI_URL:-http://xwiki-postgres-tomcat-web:8080}
+      - XWIKI_PUBLIC_URL=${XWIKI_PUBLIC_URL:-}
       - XWIKI_WIKI=${XWIKI_WIKI:-xwiki}
       - AUTHENTIK_ISSUER=${AUTHENTIK_ISSUER}
       - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID}

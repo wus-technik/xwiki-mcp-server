@@ -7,7 +7,14 @@ export class XWikiAuthError extends Error {
 
 const DEFAULT_SYNTAX = "markdown/1.2";
 
-export function createXWikiClient({ baseUrl, wiki, fetcher = fetch }) {
+export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch }) {
+  const linkBase = (publicUrl || baseUrl || "").replace(/\/$/, "");
+
+  function viewUrl(pageFullName) {
+    const segments = String(pageFullName || "").split(".").map(encodeURIComponent);
+    return `${linkBase}/bin/view/${segments.join("/")}`;
+  }
+
   function normalizeHeadingName(value) {
     return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
   }
@@ -218,7 +225,7 @@ export function createXWikiClient({ baseUrl, wiki, fetcher = fetch }) {
         title: r.title || r.pageName,
         space: r.space,
         pagePath: r.pageFullName || [r.space, r.pageName].filter(Boolean).join("."),
-        url: `${baseUrl}/bin/view/${(r.pageFullName || "").replace(/\./g, "/")}`,
+        url: viewUrl(r.pageFullName),
       }));
 
       if (options.includeHeadings !== true) {
@@ -268,7 +275,7 @@ export function createXWikiClient({ baseUrl, wiki, fetcher = fetch }) {
       if (res.status === 401) throw new XWikiAuthError("XWiki session expired. Please re-authenticate.");
       if (res.status === 403) throw new Error("Access denied. Insufficient XWiki permissions.");
       if (!res.ok) throw new Error(`XWiki page create failed: ${res.status}`);
-      return `${baseUrl}/bin/view/${pagePath.replace(/\./g, "/")}`;
+      return viewUrl(normalizePagePath(pagePath));
     },
   };
 }

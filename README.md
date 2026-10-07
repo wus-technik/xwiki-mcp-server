@@ -112,6 +112,7 @@ Preserve `Host` header so OAuth redirect URIs and callback URLs resolve correctl
 
 **Required env vars for this setup:**
 - `XWIKI_URL=http://xwiki-postgres-tomcat-web:8080` — use the internal Docker hostname (join the same network)
+- `XWIKI_PUBLIC_URL=https://xwiki.wus-technik.com` — public URL used for page links returned to clients
 - `MCP_BASE_URL=https://xwiki.wus-technik.com/mcp`
 - `OAUTH_REDIRECT_URI=https://xwiki.wus-technik.com/mcp/oauth/callback` — includes the `/mcp/` prefix (goes through HAProxy)
 
@@ -232,6 +233,7 @@ To use this MCP server with Cursor or Claude Desktop, add the following configur
 |----------|-------------|---------|
 | `PORT` | Server port | `3000` |
 | `XWIKI_URL` | XWiki internal URL (used for REST API calls) | - |
+| `XWIKI_PUBLIC_URL` | Public XWiki URL used for page links in tool results | `XWIKI_URL` |
 | `XWIKI_WIKI` | Wiki name | `xwiki` |
 | `AUTHENTIK_ISSUER` | Authentik base URL | - |
 | `OAUTH_CLIENT_ID` | Authentik OAuth2 client ID | - |

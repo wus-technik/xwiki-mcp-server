@@ -46,7 +46,8 @@ docker-compose up -d --build
 ```
 
 Required env vars (see docker-compose.yml for full list):
-- `XWIKI_URL` — XWiki base URL
+- `XWIKI_URL` — XWiki base URL for REST calls (internal hostname in production)
+- `XWIKI_PUBLIC_URL` — public XWiki URL for page links returned to clients (defaults to `XWIKI_URL`)
 - `AUTHENTIK_ISSUER` — Authentik base URL (e.g. `https://auth.example.com`)
 - `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET` — Authentik OIDC application credentials
 - `OAUTH_REDIRECT_URI` — this server's callback URL (e.g. `https://xwiki.example.com/mcp/oauth/callback`)

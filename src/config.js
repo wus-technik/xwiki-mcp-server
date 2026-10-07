@@ -1,5 +1,8 @@
 export const PORT = process.env.PORT || "3000";
 export const XWIKI_URL = (process.env.XWIKI_URL || "").replace(/\/$/, "");
+// Public base URL for page links returned to MCP clients; XWIKI_URL is usually an internal
+// Docker hostname that clients cannot open. Falls back to XWIKI_URL.
+export const XWIKI_PUBLIC_URL = (process.env.XWIKI_PUBLIC_URL || XWIKI_URL).replace(/\/$/, "");
 export const XWIKI_WIKI = process.env.XWIKI_WIKI || "xwiki";
 
 export const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || "";

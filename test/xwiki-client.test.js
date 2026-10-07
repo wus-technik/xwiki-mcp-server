@@ -239,3 +239,33 @@ test("getPage throws generic error on 403 (not XWikiAuthError)", async () => {
     (err) => !(err instanceof XWikiAuthError) && err.message.includes("Access denied")
   );
 });
+
+test("links use publicUrl and encode path segments; REST calls stay on baseUrl", async () => {
+  const fetcher = mock.fn(async (url) => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    json: async () => (url.includes("/search?")
+      ? { searchResults: [{ title: "Docker Struktur", pageName: "WebHome", space: "IT.Virtualisierung.Docker Struktur", pageFullName: "IT.Virtualisierung.Docker Struktur.WebHome" }] }
+      : {}),
+    text: async () => "",
+  }));
+  const client = createXWikiClient({
+    baseUrl: "http://xwiki-internal:8080",
+    publicUrl: "https://xwiki.example.com/",
+    wiki: WIKI,
+    fetcher,
+  });
+  const results = await client.search("docker", 5, { xwikiCookie: COOKIE });
+  assert.equal(results[0].url, "https://xwiki.example.com/bin/view/IT/Virtualisierung/Docker%20Struktur/WebHome");
+  assert.ok(fetcher.mock.calls[0].arguments[0].startsWith("http://xwiki-internal:8080/rest/"));
+});
+
+test("links fall back to baseUrl when no publicUrl is given", async () => {
+  const fetcher = mockFetch(200, {
+    searchResults: [{ title: "Home", pageName: "WebHome", space: "Main", pageFullName: "Main.WebHome" }],
+  });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  const results = await client.search("home", 5, { xwikiCookie: COOKIE });
+  assert.equal(results[0].url, `${BASE_URL}/bin/view/Main/WebHome`);
+});
