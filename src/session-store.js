@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 const authStates = new Map();
 const authCodes  = new Map();
 const sessions   = new Map();
+const consumedUploadNonces = new Map(); // nonce -> expiresAt (mirrors the upload token's own expiry)
 
 const AUTH_STATE_TTL = 10 * 60 * 1000;
 const AUTH_CODE_TTL  = 5 * 60 * 1000;
@@ -48,4 +49,22 @@ export function getSession(sessionId) {
 
 export function deleteSession(sessionId) {
   sessions.delete(sessionId);
+}
+
+// ponytail: sweeps the whole map on every check; upload tokens live 5 minutes so this
+// stays tiny in practice — switch to a timer-based sweep if upload volume grows a lot.
+function sweepConsumedUploadNonces() {
+  const now = Date.now();
+  for (const [nonce, expiresAt] of consumedUploadNonces) {
+    if (now > expiresAt) consumedUploadNonces.delete(nonce);
+  }
+}
+
+export function isUploadNonceConsumed(nonce) {
+  sweepConsumedUploadNonces();
+  return consumedUploadNonces.has(nonce);
+}
+
+export function markUploadNonceConsumed(nonce, expiresAt) {
+  consumedUploadNonces.set(nonce, expiresAt);
 }

@@ -15,8 +15,8 @@ function makeClient(overrides = {}) {
   };
 }
 
-test("TOOLS exports array with 4 tool definitions", () => {
-  assert.equal(TOOLS.length, 4);
+test("TOOLS exports array with 5 tool definitions", () => {
+  assert.equal(TOOLS.length, 5);
   assert.ok(TOOLS.every((t) => t.name && t.description && t.inputSchema));
 });
 
@@ -85,19 +85,36 @@ test("callTool upload_xwiki_attachment calls client.uploadAttachment", async () 
   const client = makeClient();
   const result = await callTool(
     "upload_xwiki_attachment",
-    { page_path: "Main.New", filename: "report.pdf", file_path: "/tmp/report.pdf", content_type: "application/pdf" },
+    { page_path: "Main.New", filename: "report.pdf", source_url: "https://example.com/report.pdf", content_type: "application/pdf" },
     SESSION,
     client,
   );
   assert.equal(client.uploadAttachment.mock.calls[0].arguments[0], "Main.New");
   assert.equal(client.uploadAttachment.mock.calls[0].arguments[1], "report.pdf");
   assert.deepEqual(client.uploadAttachment.mock.calls[0].arguments[2], {
-    filePath: "/tmp/report.pdf",
-    data: undefined,
+    sourceUrl: "https://example.com/report.pdf",
     contentType: "application/pdf",
   });
   assert.equal(client.uploadAttachment.mock.calls[0].arguments[3], SESSION);
   assert.ok(result.startsWith("Attachment uploaded:"));
+});
+
+test("callTool get_xwiki_upload_url mints a token and returns an uploadUrl/curlCommand", async () => {
+  const client = makeClient();
+  const toolConfig = { sessionSecret: "test-secret-32-chars-minimum-pad", mcpBaseUrl: "https://mcp.example.com/mcp" };
+  const sessionCtx = { ...SESSION, sessionId: "sess-123" };
+  const result = await callTool(
+    "get_xwiki_upload_url",
+    { page_path: "Main.New", filename: "photo.png" },
+    sessionCtx,
+    client,
+    toolConfig,
+  );
+  const parsed = JSON.parse(result);
+  assert.ok(parsed.uploadUrl.startsWith("https://mcp.example.com/mcp/uploads/"));
+  assert.ok(parsed.curlCommand.includes(parsed.uploadUrl));
+  assert.ok(parsed.curlCommand.startsWith("curl -T"));
+  assert.ok(parsed.expiresInSeconds > 0 && parsed.expiresInSeconds <= 300);
 });
 
 test("callTool re-throws XWikiAuthError (does not catch it as string)", async () => {

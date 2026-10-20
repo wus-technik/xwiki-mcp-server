@@ -1,4 +1,5 @@
 import { XWikiAuthError } from "./xwiki-client.js";
+import { mintUploadToken } from "./upload-token.js";
 
 export const TOOLS = [
   {
@@ -66,20 +67,34 @@ export const TOOLS = [
   },
   {
     name: "upload_xwiki_attachment",
-    description: "Upload a file (e.g. PDF, image, video) as an attachment to an XWiki page",
+    description:
+      "Upload a file as an attachment to an XWiki page FROM A URL YOU ALREADY HAVE (e.g. a Jira attachment link, an email/Teams attachment link, or an intranet share URL) — the server fetches the bytes itself over HTTP(S), they never pass through you. Do NOT use this if the file only exists on your local machine with no existing URL for it; use `get_xwiki_upload_url` for that instead.",
     inputSchema: {
       type: "object",
       properties: {
         page_path: { type: "string", description: "Page path (e.g. Main.WebHome)" },
         filename: { type: "string", description: "Attachment filename, including extension (e.g. report.pdf)" },
-        file_path: {
+        source_url: {
           type: "string",
-          description: "Local filesystem path to read the file bytes from. Alternative to `data`.",
+          description: "HTTP(S) URL the server fetches the file from itself (bytes never pass through the calling client). Required.",
         },
-        data: {
+        content_type: {
           type: "string",
-          description: "Base64-encoded file content. Alternative to `file_path`.",
+          description: "MIME type of the file (default application/octet-stream)",
         },
+      },
+      required: ["page_path", "filename", "source_url"],
+    },
+  },
+  {
+    name: "get_xwiki_upload_url",
+    description:
+      "Get a short-lived (5 minute), single-use upload URL for attaching a file that exists ONLY on your local filesystem (no existing URL anywhere) to an XWiki page. This tool does not upload anything itself — it only issues the URL. You must then run the returned `curlCommand` yourself (e.g. via a shell/Bash tool), substituting in the real local file path, to `curl -T <local-file-path> \"<uploadUrl>\"` and send the bytes directly over HTTPS. Do NOT use this if you already have an http(s) URL for the file; use `upload_xwiki_attachment` with `source_url` instead.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        page_path: { type: "string", description: "Page path (e.g. Main.WebHome)" },
+        filename: { type: "string", description: "Attachment filename, including extension (e.g. report.pdf)" },
         content_type: {
           type: "string",
           description: "MIME type of the file (default application/octet-stream)",
@@ -90,7 +105,7 @@ export const TOOLS = [
   },
 ];
 
-export async function callTool(name, args, sessionCtx, xwikiClient) {
+export async function callTool(name, args, sessionCtx, xwikiClient, toolConfig = {}) {
   try {
     if (name === "search_xwiki") {
       const { query, limit = 10, include_headings = false } = args;
@@ -121,14 +136,30 @@ export async function callTool(name, args, sessionCtx, xwikiClient) {
       return `Page created/updated: ${url}`;
     }
     if (name === "upload_xwiki_attachment") {
-      const { page_path, filename, file_path, data, content_type } = args;
+      const { page_path, filename, source_url, content_type } = args;
       const url = await xwikiClient.uploadAttachment(
         page_path,
         filename,
-        { filePath: file_path, data, contentType: content_type },
+        { sourceUrl: source_url, contentType: content_type },
         sessionCtx,
       );
       return `Attachment uploaded: ${url}`;
+    }
+    if (name === "get_xwiki_upload_url") {
+      const { page_path, filename, content_type } = args;
+      const { token, payload } = mintUploadToken({
+        sessionId: sessionCtx.sessionId,
+        pagePath: page_path,
+        filename,
+        contentType: content_type,
+        secret: toolConfig.sessionSecret,
+      });
+      const uploadUrl = `${toolConfig.mcpBaseUrl}/uploads/${token}`;
+      return JSON.stringify({
+        uploadUrl,
+        curlCommand: `curl -T <PATH_PLACEHOLDER> "${uploadUrl}"`,
+        expiresInSeconds: Math.round((payload.exp - Date.now()) / 1000),
+      }, null, 2);
     }
     return `Unknown tool: ${name}`;
   } catch (e) {

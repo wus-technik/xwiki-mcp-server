@@ -231,16 +231,59 @@ test("createPage throws XWikiAuthError on 401 during form token fetch", async ()
   );
 });
 
-test("uploadAttachment fetches form token then PUTs raw bytes to the attachment endpoint", async () => {
-  const calls = [];
+test("uploadAttachment returns a publicUrl-based download link when configured", async () => {
+  const sourceUrl = "http://xwiki-internal:8080/files/report.pdf";
   const fetcher = mock.fn(async (url, opts) => {
-    calls.push({ url, method: opts?.method || "GET", headers: opts?.headers, body: opts?.body });
+    if (url === sourceUrl) {
+      return {
+        ok: true, status: 200,
+        headers: { get: () => null },
+        arrayBuffer: async () => new TextEncoder().encode("hello pdf").buffer,
+      };
+    }
     if (opts?.method === "PUT") {
       return { ok: true, status: 201, headers: { get: () => null }, text: async () => "" };
     }
     return {
       ok: true, status: 200,
-      headers: { get: (k) => k === "XWiki-Form-Token" ? "tok-abc" : null },
+      headers: { get: (k) => (k === "XWiki-Form-Token" ? "tok-abc" : null) },
+      json: async () => ({}),
+    };
+  });
+  const client = createXWikiClient({
+    baseUrl: "http://xwiki-internal:8080",
+    publicUrl: "https://xwiki.example.com/",
+    wiki: WIKI,
+    fetcher,
+  });
+  const url = await client.uploadAttachment(
+    "Main.TestPage",
+    "report.pdf",
+    { sourceUrl },
+    { xwikiCookie: COOKIE },
+  );
+  assert.equal(url, "https://xwiki.example.com/bin/download/Main/TestPage/report.pdf");
+  assert.ok(fetcher.mock.calls.every((c) => !c.arguments[0].startsWith("https://xwiki.example.com")));
+});
+
+test("uploadAttachment fetches bytes server-side from source_url and PUTs them", async () => {
+  const sourceUrl = `${BASE_URL}/files/report.pdf`;
+  let putBody;
+  const fetcher = mock.fn(async (url, opts) => {
+    if (url === sourceUrl) {
+      return {
+        ok: true, status: 200,
+        headers: { get: (k) => (k === "content-length" ? "9" : null) },
+        arrayBuffer: async () => new TextEncoder().encode("hello pdf").buffer,
+      };
+    }
+    if (opts?.method === "PUT") {
+      putBody = opts.body;
+      return { ok: true, status: 201, headers: { get: () => null }, text: async () => "" };
+    }
+    return {
+      ok: true, status: 200,
+      headers: { get: (k) => (k === "XWiki-Form-Token" ? "tok-abc" : null) },
       json: async () => ({}),
     };
   });
@@ -248,57 +291,147 @@ test("uploadAttachment fetches form token then PUTs raw bytes to the attachment 
   const url = await client.uploadAttachment(
     "Main.TestPage",
     "report.pdf",
-    { data: Buffer.from("hello pdf").toString("base64"), contentType: "application/pdf" },
+    { sourceUrl },
     { xwikiCookie: COOKIE },
   );
-  assert.equal(calls[0].method, "GET");
-  assert.equal(calls[1].method, "PUT");
-  assert.ok(calls[1].url.endsWith("/pages/TestPage/attachments/report.pdf"));
-  assert.equal(calls[1].headers["Content-Type"], "application/pdf");
-  assert.equal(calls[1].headers["XWiki-Form-Token"], "tok-abc");
-  assert.ok(Buffer.from(calls[1].body).equals(Buffer.from("hello pdf")));
+  assert.ok(Buffer.from(putBody).equals(Buffer.from("hello pdf")));
   assert.equal(url, `${BASE_URL}/bin/download/Main/TestPage/report.pdf`);
 });
 
-test("uploadAttachment reads bytes from file_path when provided", async () => {
-  const tmpFile = `/tmp/xwiki-mcp-test-${Date.now()}.bin`;
-  const { writeFile, unlink } = await import("node:fs/promises");
-  await writeFile(tmpFile, Buffer.from([1, 2, 3, 4]));
-  try {
-    let putBody;
-    const fetcher = mock.fn(async (url, opts) => {
-      if (opts?.method === "PUT") {
-        putBody = opts.body;
-        return { ok: true, status: 201, headers: { get: () => null }, text: async () => "" };
-      }
-      return {
-        ok: true, status: 200,
-        headers: { get: (k) => k === "XWiki-Form-Token" ? "tok-abc" : null },
-        json: async () => ({}),
-      };
-    });
-    const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
-    await client.uploadAttachment("Main.TestPage", "data.bin", { filePath: tmpFile }, { xwikiCookie: COOKIE });
-    assert.ok(Buffer.from(putBody).equals(Buffer.from([1, 2, 3, 4])));
-  } finally {
-    await unlink(tmpFile);
-  }
+test("uploadAttachment rejects non-http(s) source_url schemes", async () => {
+  const fetcher = mock.fn(async () => { throw new Error("must not be called"); });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  await assert.rejects(
+    () => client.uploadAttachment("Main.TestPage", "data.bin", { sourceUrl: "file:///etc/passwd" }, { xwikiCookie: COOKIE }),
+    /must use http or https/
+  );
+  assert.equal(fetcher.mock.calls.length, 0);
 });
 
-test("uploadAttachment throws when neither file_path nor data is given", async () => {
+test("uploadAttachment rejects source_url pointing at a loopback address", async () => {
+  const fetcher = mock.fn(async () => { throw new Error("must not be called"); });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  await assert.rejects(
+    () => client.uploadAttachment("Main.TestPage", "data.bin", { sourceUrl: "http://127.0.0.1/secret" }, { xwikiCookie: COOKIE }),
+    /disallowed internal\/private address/
+  );
+  assert.equal(fetcher.mock.calls.length, 0);
+});
+
+test("uploadAttachment rejects source_url pointing at a private address", async () => {
+  const fetcher = mock.fn(async () => { throw new Error("must not be called"); });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  await assert.rejects(
+    () => client.uploadAttachment("Main.TestPage", "data.bin", { sourceUrl: "http://10.1.2.3/secret" }, { xwikiCookie: COOKIE }),
+    /disallowed internal\/private address/
+  );
+  assert.equal(fetcher.mock.calls.length, 0);
+});
+
+test("uploadAttachment rejects source_url pointing at the cloud metadata / link-local address", async () => {
+  const fetcher = mock.fn(async () => { throw new Error("must not be called"); });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  await assert.rejects(
+    () => client.uploadAttachment(
+      "Main.TestPage",
+      "data.bin",
+      { sourceUrl: "http://169.254.169.254/latest/meta-data/" },
+      { xwikiCookie: COOKIE },
+    ),
+    /disallowed internal\/private address/
+  );
+  assert.equal(fetcher.mock.calls.length, 0);
+});
+
+test("uploadAttachment allows source_url on the trusted internal XWiki host without a DNS check", async () => {
+  // Uses an internal-looking hostname that would otherwise fail DNS resolution,
+  // proving the trusted-host exception (not the IP check) is what let it through.
+  const internalBaseUrl = "http://xwiki-postgres-tomcat-web:8080";
+  const sourceUrl = `${internalBaseUrl}/files/report.pdf`;
+  const fetcher = mock.fn(async (url, opts) => {
+    if (url === sourceUrl) {
+      return {
+        ok: true, status: 200,
+        headers: { get: () => null },
+        arrayBuffer: async () => new TextEncoder().encode("hi").buffer,
+      };
+    }
+    if (opts?.method === "PUT") {
+      return { ok: true, status: 201, headers: { get: () => null }, text: async () => "" };
+    }
+    return {
+      ok: true, status: 200,
+      headers: { get: (k) => (k === "XWiki-Form-Token" ? "tok-abc" : null) },
+      json: async () => ({}),
+    };
+  });
+  const client = createXWikiClient({ baseUrl: internalBaseUrl, wiki: WIKI, fetcher });
+  await client.uploadAttachment("Main.TestPage", "data.bin", { sourceUrl }, { xwikiCookie: COOKIE });
+  assert.equal(fetcher.mock.calls.some((c) => c.arguments[0] === sourceUrl), true);
+});
+
+test("uploadAttachment rejects an oversized source_url response via Content-Length", async () => {
+  const sourceUrl = `${BASE_URL}/huge.bin`;
+  const fetcher = mock.fn(async (url) => {
+    if (url === sourceUrl) {
+      return {
+        ok: true, status: 200,
+        headers: { get: (k) => (k === "content-length" ? String(60 * 1024 * 1024) : null) },
+        arrayBuffer: async () => new ArrayBuffer(0),
+      };
+    }
+    throw new Error("must not reach form token / PUT");
+  });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  await assert.rejects(
+    () => client.uploadAttachment("Main.TestPage", "data.bin", { sourceUrl }, { xwikiCookie: COOKIE }),
+    /exceeds maximum allowed size/
+  );
+});
+
+test("uploadAttachment rejects an oversized source_url body even when Content-Length is missing", async () => {
+  const sourceUrl = `${BASE_URL}/huge.bin`;
+  const fetcher = mock.fn(async (url) => {
+    if (url === sourceUrl) {
+      return {
+        ok: true, status: 200,
+        headers: { get: () => null },
+        arrayBuffer: async () => new ArrayBuffer(51 * 1024 * 1024),
+      };
+    }
+    throw new Error("must not reach form token / PUT");
+  });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  await assert.rejects(
+    () => client.uploadAttachment("Main.TestPage", "data.bin", { sourceUrl }, { xwikiCookie: COOKIE }),
+    /exceeds maximum allowed size/
+  );
+});
+
+test("uploadAttachment throws when source_url is not given", async () => {
   const fetcher = mockFetch(200, {});
   const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
   await assert.rejects(
     () => client.uploadAttachment("Main.TestPage", "data.bin", {}, { xwikiCookie: COOKIE }),
-    /file_path or data/
+    /source_url is required/
   );
 });
 
 test("uploadAttachment throws XWikiAuthError on 401 during form token fetch", async () => {
-  const fetcher = mockFetch(401, {});
+  const sourceUrl = `${BASE_URL}/files/data.bin`;
+  const fetcher = mock.fn(async (url) => {
+    if (url === sourceUrl) {
+      return {
+        ok: true, status: 200,
+        headers: { get: () => null },
+        arrayBuffer: async () => new TextEncoder().encode("hi").buffer,
+      };
+    }
+    return { ok: false, status: 401, headers: { get: () => null }, json: async () => ({}) };
+  });
   const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
   await assert.rejects(
-    () => client.uploadAttachment("Main.TestPage", "data.bin", { data: "aGVsbG8=" }, { xwikiCookie: COOKIE }),
+    () => client.uploadAttachment("Main.TestPage", "data.bin", { sourceUrl }, { xwikiCookie: COOKIE }),
     XWikiAuthError
   );
 });

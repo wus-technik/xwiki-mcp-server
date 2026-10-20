@@ -10,6 +10,7 @@ import { createAuthMiddleware } from "./auth-middleware.js";
 import { createAuthDebugLogger } from "./auth-debug.js";
 import { createSseRouter } from "./sse-handler.js";
 import { createXWikiClient, XWikiAuthError } from "./xwiki-client.js";
+import { createUploadRouter } from "./upload-route.js";
 import { handleMcpRequest } from "./mcp-handler.js";
 import { deleteSession } from "./session-store.js";
 
@@ -73,7 +74,10 @@ export function createApp(overrides = {}) {
 
     let result;
     try {
-      result = await handleMcpRequest(method, params, sessionCtx, xwikiClient);
+      result = await handleMcpRequest(method, params, sessionCtx, xwikiClient, {
+        sessionSecret: cfg.sessionSecret,
+        mcpBaseUrl: cfg.mcpBaseUrl,
+      });
     } catch (e) {
       if (e instanceof XWikiAuthError) {
         authDebugLogger.warn("xwiki_session_expired", req, {
@@ -103,6 +107,10 @@ export function createApp(overrides = {}) {
     authDebugLogger,
     xwikiClient,
   }));
+
+  // Not wrapped with authMiddleware: a bare `curl -T` can't send a Bearer token.
+  // The signed, single-use token in the URL path is the auth.
+  mcpRouter.use(createUploadRouter({ sessionSecret: cfg.sessionSecret, xwikiClient }));
 
   mcpRouter.get("/health", (_req, res) => {
     res.json({ status: "ok", xwiki: cfg.xwikiUrl ? "configured" : "not configured" });

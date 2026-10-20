@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { lookup } from "node:dns/promises";
 
 export class XWikiAuthError extends Error {
   constructor(message) {
@@ -8,6 +8,35 @@ export class XWikiAuthError extends Error {
 }
 
 const DEFAULT_SYNTAX = "markdown/1.2";
+export const MAX_SOURCE_URL_BYTES = 50 * 1024 * 1024;
+const SOURCE_URL_TIMEOUT_MS = 30_000;
+
+// ponytail: covers the common private/loopback/link-local ranges (including the
+// 169.254.169.254 cloud metadata address); exotic ranges (e.g. 100.64.0.0/10 CGNAT)
+// are not covered, add if a real target needs it.
+function isDisallowedIp(ip) {
+  if (ip.includes(":")) {
+    const lower = ip.toLowerCase();
+    if (lower === "::1") return true; // loopback
+    if (lower.startsWith("::ffff:") && lower.slice(7).includes(".")) {
+      return isDisallowedIp(lower.slice(7));
+    }
+    const firstGroup = parseInt(lower.split(":")[0] || "0", 16);
+    if (firstGroup >= 0xfe80 && firstGroup <= 0xfebf) return true; // link-local
+    if (firstGroup >= 0xfc00 && firstGroup <= 0xfdff) return true; // unique local (private)
+    return false;
+  }
+  const octets = ip.split(".").map(Number);
+  if (octets.length !== 4 || octets.some((n) => !Number.isInteger(n))) return true; // malformed, reject
+  const [a, b] = octets;
+  if (a === 127) return true; // loopback
+  if (a === 10) return true; // private
+  if (a === 172 && b >= 16 && b <= 31) return true; // private
+  if (a === 192 && b === 168) return true; // private
+  if (a === 169 && b === 254) return true; // link-local incl. cloud metadata
+  if (a === 0) return true; // unspecified/this-network
+  return false;
+}
 
 export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch }) {
   const linkBase = (publicUrl || baseUrl || "").replace(/\/$/, "");
@@ -15,6 +44,73 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch })
   function viewUrl(pageFullName) {
     const segments = String(pageFullName || "").split(".").map(encodeURIComponent);
     return `${linkBase}/bin/view/${segments.join("/")}`;
+  }
+
+  function downloadUrl(pagePath, filename) {
+    const segments = normalizePagePath(pagePath).split(".").map(encodeURIComponent);
+    return `${linkBase}/bin/download/${segments.join("/")}/${encodeURIComponent(filename)}`;
+  }
+
+  async function fetchFromSourceUrl(sourceUrl) {
+    let parsed;
+    try {
+      parsed = new URL(sourceUrl);
+    } catch {
+      throw new Error("source_url is not a valid URL");
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("source_url must use http or https");
+    }
+
+    let trustedHost = "";
+    try {
+      trustedHost = new URL(baseUrl).hostname.toLowerCase();
+    } catch {
+      // no configured baseUrl to trust; fall through to the IP checks below
+    }
+
+    if (parsed.hostname.toLowerCase() !== trustedHost) {
+      let addresses;
+      try {
+        addresses = await lookup(parsed.hostname, { all: true });
+      } catch {
+        throw new Error(`Could not resolve source_url host: ${parsed.hostname}`);
+      }
+      if (addresses.length === 0 || addresses.some((addr) => isDisallowedIp(addr.address))) {
+        throw new Error("source_url resolves to a disallowed internal/private address");
+      }
+    }
+
+    const res = await fetcher(sourceUrl, { signal: AbortSignal.timeout(SOURCE_URL_TIMEOUT_MS) });
+    if (!res.ok) throw new Error(`Failed to fetch source_url: ${res.status}`);
+
+    const declaredLength = Number(res.headers.get("content-length"));
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_SOURCE_URL_BYTES) {
+      throw new Error(`source_url content exceeds maximum allowed size (${MAX_SOURCE_URL_BYTES} bytes)`);
+    }
+
+    if (res.body && typeof res.body.getReader === "function") {
+      const reader = res.body.getReader();
+      const chunks = [];
+      let total = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.length;
+        if (total > MAX_SOURCE_URL_BYTES) {
+          reader.cancel().catch(() => {});
+          throw new Error(`source_url content exceeds maximum allowed size (${MAX_SOURCE_URL_BYTES} bytes)`);
+        }
+        chunks.push(value);
+      }
+      return Buffer.concat(chunks);
+    }
+
+    const bytes = Buffer.from(await res.arrayBuffer());
+    if (bytes.length > MAX_SOURCE_URL_BYTES) {
+      throw new Error(`source_url content exceeds maximum allowed size (${MAX_SOURCE_URL_BYTES} bytes)`);
+    }
+    return bytes;
   }
 
   function normalizeHeadingName(value) {
@@ -215,6 +311,23 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch })
     return res.json();
   }
 
+  // Shared by uploadAttachment (source_url) and the /uploads/:token presigned-URL route:
+  // fetch the XWiki form token, then PUT the already-fetched bytes as an attachment.
+  async function putAttachmentBytes(pagePath, filename, bytes, contentType, sessionCtx) {
+    const formToken = await getFormToken(sessionCtx);
+    const url = `${getPageEndpoint(pagePath)}/attachments/${encodeURIComponent(filename)}`;
+    const headers = {
+      ...cookieHeaders(sessionCtx),
+      "Content-Type": contentType || "application/octet-stream",
+      ...(formToken ? { "XWiki-Form-Token": formToken } : {}),
+    };
+    const res = await fetcher(url, { method: "PUT", headers, body: bytes });
+    if (res.status === 401) throw new XWikiAuthError("XWiki session expired. Please re-authenticate.");
+    if (res.status === 403) throw new Error("Access denied. Insufficient XWiki permissions.");
+    if (!res.ok) throw new Error(`XWiki attachment upload failed: ${res.status}`);
+    return downloadUrl(pagePath, filename);
+  }
+
   return {
     async search(query, limitOrOptions = 10, optionsOrSessionCtx = {}, maybeSessionCtx = {}) {
       const { limit, options, sessionCtx } = resolveSearchArgs(limitOrOptions, optionsOrSessionCtx, maybeSessionCtx);
@@ -280,23 +393,13 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch })
       return viewUrl(normalizePagePath(pagePath));
     },
 
-    async uploadAttachment(pagePath, filename, { filePath, data, contentType } = {}, sessionCtx = {}) {
+    async uploadAttachment(pagePath, filename, { sourceUrl, contentType } = {}, sessionCtx = {}) {
       if (!filename) throw new Error("filename is required");
-      if (!filePath && !data) throw new Error("Either file_path or data (base64) is required");
-      const bytes = filePath ? await readFile(filePath) : Buffer.from(data, "base64");
-
-      const formToken = await getFormToken(sessionCtx);
-      const url = `${getPageEndpoint(pagePath)}/attachments/${encodeURIComponent(filename)}`;
-      const headers = {
-        ...cookieHeaders(sessionCtx),
-        "Content-Type": contentType || "application/octet-stream",
-        ...(formToken ? { "XWiki-Form-Token": formToken } : {}),
-      };
-      const res = await fetcher(url, { method: "PUT", headers, body: bytes });
-      if (res.status === 401) throw new XWikiAuthError("XWiki session expired. Please re-authenticate.");
-      if (res.status === 403) throw new Error("Access denied. Insufficient XWiki permissions.");
-      if (!res.ok) throw new Error(`XWiki attachment upload failed: ${res.status}`);
-      return `${baseUrl}/bin/download/${pagePath.replace(/\./g, "/")}/${encodeURIComponent(filename)}`;
+      if (!sourceUrl) throw new Error("source_url is required");
+      const bytes = await fetchFromSourceUrl(sourceUrl);
+      return putAttachmentBytes(pagePath, filename, bytes, contentType, sessionCtx);
     },
+
+    putAttachmentBytes,
   };
 }

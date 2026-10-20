@@ -46,7 +46,7 @@ export function createSseRouter({ sessionSecret, mcpBaseUrl = "", authDebugLogge
 
     let result;
     try {
-      result = await handleMcpRequest(method, params, sessionCtx, xwikiClient);
+      result = await handleMcpRequest(method, params, sessionCtx, xwikiClient, { sessionSecret, mcpBaseUrl });
     } catch (e) {
       if (e.name === "XWikiAuthError") {
         authDebugLogger?.warn("xwiki_session_expired", req, {
