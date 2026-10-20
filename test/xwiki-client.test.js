@@ -231,6 +231,78 @@ test("createPage throws XWikiAuthError on 401 during form token fetch", async ()
   );
 });
 
+test("uploadAttachment fetches form token then PUTs raw bytes to the attachment endpoint", async () => {
+  const calls = [];
+  const fetcher = mock.fn(async (url, opts) => {
+    calls.push({ url, method: opts?.method || "GET", headers: opts?.headers, body: opts?.body });
+    if (opts?.method === "PUT") {
+      return { ok: true, status: 201, headers: { get: () => null }, text: async () => "" };
+    }
+    return {
+      ok: true, status: 200,
+      headers: { get: (k) => k === "XWiki-Form-Token" ? "tok-abc" : null },
+      json: async () => ({}),
+    };
+  });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  const url = await client.uploadAttachment(
+    "Main.TestPage",
+    "report.pdf",
+    { data: Buffer.from("hello pdf").toString("base64"), contentType: "application/pdf" },
+    { xwikiCookie: COOKIE },
+  );
+  assert.equal(calls[0].method, "GET");
+  assert.equal(calls[1].method, "PUT");
+  assert.ok(calls[1].url.endsWith("/pages/TestPage/attachments/report.pdf"));
+  assert.equal(calls[1].headers["Content-Type"], "application/pdf");
+  assert.equal(calls[1].headers["XWiki-Form-Token"], "tok-abc");
+  assert.ok(Buffer.from(calls[1].body).equals(Buffer.from("hello pdf")));
+  assert.equal(url, `${BASE_URL}/bin/download/Main/TestPage/report.pdf`);
+});
+
+test("uploadAttachment reads bytes from file_path when provided", async () => {
+  const tmpFile = `/tmp/xwiki-mcp-test-${Date.now()}.bin`;
+  const { writeFile, unlink } = await import("node:fs/promises");
+  await writeFile(tmpFile, Buffer.from([1, 2, 3, 4]));
+  try {
+    let putBody;
+    const fetcher = mock.fn(async (url, opts) => {
+      if (opts?.method === "PUT") {
+        putBody = opts.body;
+        return { ok: true, status: 201, headers: { get: () => null }, text: async () => "" };
+      }
+      return {
+        ok: true, status: 200,
+        headers: { get: (k) => k === "XWiki-Form-Token" ? "tok-abc" : null },
+        json: async () => ({}),
+      };
+    });
+    const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+    await client.uploadAttachment("Main.TestPage", "data.bin", { filePath: tmpFile }, { xwikiCookie: COOKIE });
+    assert.ok(Buffer.from(putBody).equals(Buffer.from([1, 2, 3, 4])));
+  } finally {
+    await unlink(tmpFile);
+  }
+});
+
+test("uploadAttachment throws when neither file_path nor data is given", async () => {
+  const fetcher = mockFetch(200, {});
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  await assert.rejects(
+    () => client.uploadAttachment("Main.TestPage", "data.bin", {}, { xwikiCookie: COOKIE }),
+    /file_path or data/
+  );
+});
+
+test("uploadAttachment throws XWikiAuthError on 401 during form token fetch", async () => {
+  const fetcher = mockFetch(401, {});
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  await assert.rejects(
+    () => client.uploadAttachment("Main.TestPage", "data.bin", { data: "aGVsbG8=" }, { xwikiCookie: COOKIE }),
+    XWikiAuthError
+  );
+});
+
 test("getPage throws generic error on 403 (not XWikiAuthError)", async () => {
   const fetcher = mockFetch(403, {});
   const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });

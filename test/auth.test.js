@@ -132,7 +132,7 @@ test("POST /mcp tools/list with valid auth returns tool list", async () => {
     .set("Authorization", `Bearer ${token}`)
     .send({ jsonrpc: "2.0", method: "tools/list", id: 2 });
   assert.equal(res.status, 200);
-  assert.equal(res.body.result.tools.length, 3);
+  assert.equal(res.body.result.tools.length, 4);
 });
 
 test("POST /mcp tools/call search_xwiki passes session context to xwiki client", async () => {

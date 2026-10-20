@@ -10,12 +10,13 @@ function makeClient(overrides = {}) {
     search: mock.fn(async () => [{ title: "Page A", space: "Main", url: "https://xwiki.example.com/bin/view/Main/PageA" }]),
     getPage: mock.fn(async () => ({ title: "Page A", content: "Hello", author: "alice", modified: "2024-01-01" })),
     createPage: mock.fn(async () => "https://xwiki.example.com/bin/view/Main/PageA"),
+    uploadAttachment: mock.fn(async () => "https://xwiki.example.com/bin/download/Main/PageA/report.pdf"),
     ...overrides,
   };
 }
 
-test("TOOLS exports array with 3 tool definitions", () => {
-  assert.equal(TOOLS.length, 3);
+test("TOOLS exports array with 4 tool definitions", () => {
+  assert.equal(TOOLS.length, 4);
   assert.ok(TOOLS.every((t) => t.name && t.description && t.inputSchema));
 });
 
@@ -78,6 +79,25 @@ test("callTool create_xwiki_page calls client.createPage", async () => {
   await callTool("create_xwiki_page", { page_path: "Main.New", title: "New", content: "body" }, SESSION, client);
   assert.equal(client.createPage.mock.calls[0].arguments[0], "Main.New");
   assert.equal(client.createPage.mock.calls[0].arguments[3], SESSION);
+});
+
+test("callTool upload_xwiki_attachment calls client.uploadAttachment", async () => {
+  const client = makeClient();
+  const result = await callTool(
+    "upload_xwiki_attachment",
+    { page_path: "Main.New", filename: "report.pdf", file_path: "/tmp/report.pdf", content_type: "application/pdf" },
+    SESSION,
+    client,
+  );
+  assert.equal(client.uploadAttachment.mock.calls[0].arguments[0], "Main.New");
+  assert.equal(client.uploadAttachment.mock.calls[0].arguments[1], "report.pdf");
+  assert.deepEqual(client.uploadAttachment.mock.calls[0].arguments[2], {
+    filePath: "/tmp/report.pdf",
+    data: undefined,
+    contentType: "application/pdf",
+  });
+  assert.equal(client.uploadAttachment.mock.calls[0].arguments[3], SESSION);
+  assert.ok(result.startsWith("Attachment uploaded:"));
 });
 
 test("callTool re-throws XWikiAuthError (does not catch it as string)", async () => {

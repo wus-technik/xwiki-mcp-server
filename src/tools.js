@@ -64,6 +64,30 @@ export const TOOLS = [
       required: ["page_path", "title", "content"],
     },
   },
+  {
+    name: "upload_xwiki_attachment",
+    description: "Upload a file (e.g. PDF, image, video) as an attachment to an XWiki page",
+    inputSchema: {
+      type: "object",
+      properties: {
+        page_path: { type: "string", description: "Page path (e.g. Main.WebHome)" },
+        filename: { type: "string", description: "Attachment filename, including extension (e.g. report.pdf)" },
+        file_path: {
+          type: "string",
+          description: "Local filesystem path to read the file bytes from. Alternative to `data`.",
+        },
+        data: {
+          type: "string",
+          description: "Base64-encoded file content. Alternative to `file_path`.",
+        },
+        content_type: {
+          type: "string",
+          description: "MIME type of the file (default application/octet-stream)",
+        },
+      },
+      required: ["page_path", "filename"],
+    },
+  },
 ];
 
 export async function callTool(name, args, sessionCtx, xwikiClient) {
@@ -95,6 +119,16 @@ export async function callTool(name, args, sessionCtx, xwikiClient) {
       const { page_path, title, content } = args;
       const url = await xwikiClient.createPage(page_path, title, content, sessionCtx);
       return `Page created/updated: ${url}`;
+    }
+    if (name === "upload_xwiki_attachment") {
+      const { page_path, filename, file_path, data, content_type } = args;
+      const url = await xwikiClient.uploadAttachment(
+        page_path,
+        filename,
+        { filePath: file_path, data, contentType: content_type },
+        sessionCtx,
+      );
+      return `Attachment uploaded: ${url}`;
     }
     return `Unknown tool: ${name}`;
   } catch (e) {

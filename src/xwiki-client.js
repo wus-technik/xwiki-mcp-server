@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+
 export class XWikiAuthError extends Error {
   constructor(message) {
     super(message);
@@ -276,6 +278,25 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch })
       if (res.status === 403) throw new Error("Access denied. Insufficient XWiki permissions.");
       if (!res.ok) throw new Error(`XWiki page create failed: ${res.status}`);
       return viewUrl(normalizePagePath(pagePath));
+    },
+
+    async uploadAttachment(pagePath, filename, { filePath, data, contentType } = {}, sessionCtx = {}) {
+      if (!filename) throw new Error("filename is required");
+      if (!filePath && !data) throw new Error("Either file_path or data (base64) is required");
+      const bytes = filePath ? await readFile(filePath) : Buffer.from(data, "base64");
+
+      const formToken = await getFormToken(sessionCtx);
+      const url = `${getPageEndpoint(pagePath)}/attachments/${encodeURIComponent(filename)}`;
+      const headers = {
+        ...cookieHeaders(sessionCtx),
+        "Content-Type": contentType || "application/octet-stream",
+        ...(formToken ? { "XWiki-Form-Token": formToken } : {}),
+      };
+      const res = await fetcher(url, { method: "PUT", headers, body: bytes });
+      if (res.status === 401) throw new XWikiAuthError("XWiki session expired. Please re-authenticate.");
+      if (res.status === 403) throw new Error("Access denied. Insufficient XWiki permissions.");
+      if (!res.ok) throw new Error(`XWiki attachment upload failed: ${res.status}`);
+      return `${baseUrl}/bin/download/${pagePath.replace(/\./g, "/")}/${encodeURIComponent(filename)}`;
     },
   };
 }
