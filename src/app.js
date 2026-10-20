@@ -117,6 +117,7 @@ export function createApp(overrides = {}) {
   });
 
   app.use("/mcp", mcpRouter);
+  app.locals.xwikiClient = xwikiClient;
 
   return app;
 }

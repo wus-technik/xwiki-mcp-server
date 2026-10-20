@@ -297,6 +297,12 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch })
       : { Accept: "application/json" };
   }
 
+  // Any authenticated request resets Tomcat's idle timer (30 min) for this session.
+  async function touchSession(sessionCtx) {
+    const res = await fetcher(`${baseUrl}/rest/`, { headers: cookieHeaders(sessionCtx) });
+    return res.status;
+  }
+
   async function getFormToken(sessionCtx) {
     const res = await fetcher(`${baseUrl}/rest/`, { headers: cookieHeaders(sessionCtx) });
     if (res.status === 401) throw new XWikiAuthError("XWiki session expired. Please re-authenticate.");
@@ -329,6 +335,8 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch })
   }
 
   return {
+    touchSession,
+
     async search(query, limitOrOptions = 10, optionsOrSessionCtx = {}, maybeSessionCtx = {}) {
       const { limit, options, sessionCtx } = resolveSearchArgs(limitOrOptions, optionsOrSessionCtx, maybeSessionCtx);
       const url = `${baseUrl}/rest/wikis/${wiki}/search?q=${encodeURIComponent(query)}&number=${limit}`;

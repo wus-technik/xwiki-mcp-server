@@ -474,3 +474,13 @@ test("links fall back to baseUrl when no publicUrl is given", async () => {
   const results = await client.search("home", 5, { xwikiCookie: COOKIE });
   assert.equal(results[0].url, `${BASE_URL}/bin/view/Main/WebHome`);
 });
+
+test("touchSession sends the session cookie to the REST root and returns the status", async () => {
+  const fetcher = mockFetch(200, {});
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  const status = await client.touchSession({ xwikiCookie: COOKIE });
+  const call = fetcher.mock.calls[0];
+  assert.equal(call.arguments[0], `${BASE_URL}/rest/`);
+  assert.equal(call.arguments[1].headers.Cookie, COOKIE);
+  assert.equal(status, 200);
+});

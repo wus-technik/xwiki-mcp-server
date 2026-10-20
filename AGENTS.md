@@ -8,7 +8,8 @@ Remote MCP server for XWiki. Exposes JSON-RPC (`/mcp`) and SSE (`/sse` + `/messa
 
 - **Entry**: `server.js` → `src/app.js` (`createApp()`)
 - **Auth**: OAuth 2.1 BFF — MCP server is both AS (for MCP clients) and OIDC client (to Authentik)
-- **Session store**: in-memory map `sessionId → { userId, xwikiCookie, expiresAt }`
+- **Session store**: map `sessionId → { userId, xwikiCookie, expiresAt }`, written through to `SESSION_FILE` (if set) so restarts keep users logged in
+- **Keep-alive**: every 10 min each live session's XWiki cookie is sent to `/rest/`, so Tomcat's 30-min idle timeout does not end the XWiki session before the 7-day MCP token
 - **XWiki auth**: per-user session cookie (captured at OAuth callback, same-origin)
 - **Transport**: HTTP (not stdio). Runs behind HAProxy at `/mcp/` under `xwiki.wus-technik.com`
 
@@ -53,6 +54,7 @@ Required env vars (see docker-compose.yml for full list):
 - `OAUTH_REDIRECT_URI` — this server's callback URL (e.g. `https://xwiki.example.com/mcp/oauth/callback`)
 - `MCP_BASE_URL` — public base URL of this server (e.g. `https://xwiki.example.com/mcp`)
 - `SESSION_SECRET` — secret for signing JWT access tokens (min 32 chars, required in production)
+- `SESSION_FILE` — path for persisted MCP sessions, e.g. `/data/sessions.json` on a volume (holds XWiki session cookies; unset = memory only)
 
 ## Conventions
 
