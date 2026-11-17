@@ -99,3 +99,102 @@ test('file mode is 0600', { skip: process.platform === 'win32' }, () => {
   openStore({ file, key });
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
 });
+
+test('short write is completed in a loop', async () => {
+  const file = tmpFile();
+  const stub = { ...fs, writeSync: (fd, buf, off, len) => fs.writeSync(fd, buf, off, Math.min(len, 7)) };
+  const s = openStore({ file, key, fs: stub });
+  await s.mutate((d) => { d.sessions.a = { sid: 'a' }; });
+  assert.deepEqual(openStore({ file, key }).read().sessions, { a: { sid: 'a' } });
+});
+
+test('zero-progress write fails, state unchanged, tmp removed', async () => {
+  const file = tmpFile();
+  let stall = false;
+  const stub = { ...fs, writeSync: (...a) => (stall ? 0 : fs.writeSync(...a)) };
+  const s = openStore({ file, key, fs: stub });
+  stall = true;
+  await assert.rejects(s.mutate((d) => { d.sessions.a = {}; }), /short write/);
+  assert.deepEqual(s.read().sessions, {});
+  assert.deepEqual(fs.readdirSync(path.dirname(file)), ['store.json']);
+});
+
+test('returned and closure-held references do not alias live state', async () => {
+  const s = openStore({ file: tmpFile(), key });
+  let held;
+  const ret = await s.mutate((d) => { held = d.sessions; d.sessions.a = { sid: 'a' }; return d.sessions; });
+  held.b = {}; ret.a.sid = 'x';
+  assert.deepEqual(s.read().sessions, { a: { sid: 'a' } });
+});
+
+test('directory fsync on posix; its failure does not fail the write', async () => {
+  const file = tmpFile();
+  let dirSynced = 0;
+  const stub = { ...fs, fsyncSync: (fd) => { if (fs.fstatSync(fd).isDirectory()) { dirSynced++; throw new Error('dirsync'); } return fs.fsyncSync(fd); } };
+  const origWarn = console.warn; console.warn = () => {};
+  try {
+    const s = openStore({ file, key, fs: stub, platform: 'linux' });
+    const before = dirSynced;
+    await s.mutate((d) => { d.sessions.a = {}; });
+    assert.ok(dirSynced > before);
+    assert.deepEqual(s.read().sessions, { a: {} });
+    assert.deepEqual(openStore({ file, key }).read().sessions, { a: {} });
+  } finally { console.warn = origWarn; }
+});
+
+test('no directory fsync on win32', async () => {
+  let dirSynced = 0;
+  const stub = { ...fs, fsyncSync: (fd) => { if (fs.fstatSync(fd).isDirectory()) dirSynced++; return fs.fsyncSync(fd); } };
+  const s = openStore({ file: tmpFile(), key, fs: stub, platform: 'win32' });
+  await s.mutate((d) => { d.sessions.a = {}; });
+  assert.equal(dirSynced, 0);
+});
+
+test('tmp file name collision (EEXIST) is retried', async () => {
+  const file = tmpFile();
+  let n = 0;
+  const stub = { ...fs, openSync: (p, f, m) => { if (f === 'wx' && n++ < 2) { const e = new Error('x'); e.code = 'EEXIST'; throw e; } return fs.openSync(p, f, m); } };
+  const s = openStore({ file, key, fs: stub });
+  assert.ok(s.read());
+  assert.ok(n >= 3);
+});
+
+test('malformed state collections -> StoreCorruptError', () => {
+  for (const bad of [[], 'x', null, 5]) {
+    const file = tmpFile();
+    const s = openStore({ file, key });
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    parsed.state.sessions = bad;
+    fs.writeFileSync(file, JSON.stringify(parsed));
+    assert.throws(() => openStore({ file, key }), StoreCorruptError);
+    assert.ok(s);
+  }
+  const file = tmpFile();
+  openStore({ file, key });
+  const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+  parsed.state = [];
+  fs.writeFileSync(file, JSON.stringify(parsed));
+  assert.throws(() => openStore({ file, key }), StoreCorruptError);
+});
+
+test('missing collection is filled empty', () => {
+  const file = tmpFile();
+  openStore({ file, key });
+  const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+  delete parsed.state.cleanups;
+  fs.writeFileSync(file, JSON.stringify(parsed));
+  assert.deepEqual(openStore({ file, key }).read().cleanups, {});
+});
+
+test('after a failed write the next mutate succeeds and file has only the second change', async () => {
+  const file = tmpFile();
+  let fail = false;
+  const stub = { ...fs, renameSync: (...a) => { if (fail) throw new Error('boom'); return fs.renameSync(...a); } };
+  const s = openStore({ file, key, fs: stub });
+  fail = true;
+  await assert.rejects(s.mutate((d) => { d.sessions.first = {}; }), /boom/);
+  fail = false;
+  await s.mutate((d) => { d.sessions.second = {}; });
+  assert.deepEqual(Object.keys(openStore({ file, key }).read().sessions), ['second']);
+  assert.deepEqual(Object.keys(s.read().sessions), ['second']);
+});
