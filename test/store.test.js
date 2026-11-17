@@ -208,13 +208,21 @@ test('non-cloneable value on the draft: memory equals what is on disk', async ()
 });
 
 test('dir fsync failure logs a warning', async () => {
+  const stubFile = tmpFile();
   const stub = { ...fs, fsyncSync: (fd) => { if (fs.fstatSync(fd).isDirectory()) throw new Error('dirsync'); return fs.fsyncSync(fd); } };
   const origWarn = console.warn; const msgs = []; console.warn = (m) => msgs.push(String(m));
   try {
-    const s = openStore({ file: tmpFile(), key, fs: stub, platform: 'linux' });
-    await s.mutate((d) => { d.sessions.a = {}; });
+    const s = openStore({ file: stubFile, key, fs: stub, platform: 'linux' });
+    await s.mutate((d) => { d.sessions.a = { marker: 'SECRET-MARKER-123' }; });
     assert.ok(msgs.length >= 1);
-    assert.ok(msgs.every((m) => !m.includes('dirsync') || true));
+    const file = JSON.parse(fs.readFileSync(stubFile, 'utf8'));
+    for (const m of msgs) {
+      assert.ok(!m.includes('SECRET-MARKER-123'));
+      assert.ok(!m.includes(file.check));
+      assert.ok(!m.includes(key.toString('base64')));
+      assert.ok(!m.includes(key.toString('base64url')));
+      assert.ok(!m.includes(key.toString('hex')));
+    }
   } finally { console.warn = origWarn; }
 });
 
