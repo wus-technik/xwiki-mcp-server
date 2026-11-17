@@ -41,7 +41,7 @@ export function createAuthentik({
   async function request(url, init) {
     let res;
     try {
-      res = await fetcher(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      res = await fetcher(url, { ...init, redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
     } catch {
       throw new AuthentikUnavailable();
     }
@@ -68,6 +68,7 @@ export function createAuthentik({
 
   // Only genuine token/claim failures count as an invalid ID token; JWKS fetch problems
   // (timeout, network, non-200) are infrastructure errors.
+  const COMPACT_JWS = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
   const INVALID_TOKEN_CODES = new Set([
     "ERR_JWT_CLAIM_VALIDATION_FAILED",
     "ERR_JWT_EXPIRED",
@@ -77,8 +78,6 @@ export function createAuthentik({
     "ERR_JOSE_ALG_NOT_ALLOWED",
     "ERR_JOSE_NOT_SUPPORTED",
     "ERR_JWKS_NO_MATCHING_KEY",
-    "ERR_JWKS_MULTIPLE_MATCHING_KEYS",
-    "ERR_JWK_INVALID",
   ]);
 
   return {
@@ -99,6 +98,9 @@ export function createAuthentik({
       if (!res.ok) throw new AuthentikError("exchange_failed", `Token exchange failed (HTTP ${res.status})`);
       const body = await readJson(res);
       if (!body?.id_token) throw new AuthentikError("invalid_id_token", "Token response has no id_token");
+      if (typeof body.id_token !== "string" || !COMPACT_JWS.test(body.id_token)) {
+        throw new AuthentikError("invalid_id_token", "ID token is not a compact JWS");
+      }
       let payload;
       try {
         ({ payload } = await jwtVerify(body.id_token, getKeys(), {

@@ -202,3 +202,40 @@ test("nur RS256 erlaubt: HS256 und ES256 abgelehnt", async () => {
     await assert.rejects(a.exchangeCode("c", "n1"), (e) => e.code === "invalid_id_token");
   }
 });
+
+test("Requests setzen redirect:manual; opaqueredirect/Status 0 -> Unavailable", async () => {
+  const inits = [];
+  const f = async (url, init) => {
+    inits.push(init);
+    return url.endsWith("/userinfo/") ? json(200, { groups: ["AdminsIT"] }) : json(200, { access_token: "a", id_token: await idToken(), refresh_token: "r" });
+  };
+  const a = make(f);
+  await a.exchangeCode("c", "n1");
+  await a.refresh("r");
+  await a.checkUser("a");
+  assert.equal(inits.length, 3);
+  for (const i of inits) assert.equal(i.redirect, "manual");
+  const opaque = async () => ({ ok: false, status: 0, type: "opaqueredirect", json: async () => ({}) });
+  await assert.rejects(make(opaque).refresh("r"), AuthentikUnavailable);
+  await assert.rejects(make(opaque).checkUser("a"), AuthentikUnavailable);
+});
+
+test("JWKS-Schluesselprobleme -> Unavailable, fehlender Schluessel -> invalid_id_token", async () => {
+  const id_token = await idToken();
+  const f = async () => json(200, { id_token, refresh_token: "rt" });
+  for (const err of [new errors.JWKSMultipleMatchingKeys(), new errors.JWKInvalid("bad jwk")]) {
+    await assert.rejects(make(f, { jwks: async () => { throw err; } }).exchangeCode("c", "n1"), AuthentikUnavailable);
+  }
+  await assert.rejects(
+    make(f, { jwks: async () => { throw new errors.JWKSNoMatchingKey(); } }).exchangeCode("c", "n1"),
+    (e) => e.code === "invalid_id_token",
+  );
+});
+
+test("ID-Token ohne drei base64url-Segmente -> invalid_id_token", async () => {
+  const [h, , s] = (await idToken()).split(".");
+  for (const id_token of ["abc", "a.b", `${h}.päyload.${s}`, `${h}.pay+load.${s}`, "a.b.c.d"]) {
+    const a = make(async () => json(200, { id_token, refresh_token: "rt" }));
+    await assert.rejects(a.exchangeCode("c", "n1"), (e) => e instanceof AuthentikError && e.code === "invalid_id_token");
+  }
+});
