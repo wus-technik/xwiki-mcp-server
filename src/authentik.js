@@ -123,7 +123,16 @@ export function createAuthentik({
         throw new AuthentikError("invalid_id_token", "ID token has no preferred_username");
       }
       if (!body.refresh_token) throw new AuthentikError("no_refresh_token", "Token response has no refresh_token");
-      return { sub: payload.sub, username: payload.preferred_username, refreshToken: body.refresh_token };
+      // The access token is only used for the group check (checkUser) right after login.
+      if (typeof body.access_token !== "string" || !body.access_token) {
+        throw new AuthentikError("no_access_token", "Token response has no access_token");
+      }
+      return {
+        sub: payload.sub,
+        username: payload.preferred_username,
+        refreshToken: body.refresh_token,
+        accessToken: body.access_token,
+      };
     },
 
     async refresh(refreshToken) {

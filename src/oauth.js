@@ -1,39 +1,150 @@
 import { Router } from "express";
-import { randomUUID, createHash, randomBytes } from "node:crypto";
-import { SignJWT, jwtVerify, decodeJwt } from "jose";
-import { isAllowedRedirect } from "./redirects.js";
-import { storeAuthState, consumeAuthState, storeAuthCode, consumeAuthCode, createSession, getSession, deleteSession } from "./session-store.js";
+import { randomUUID, randomBytes, createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { SignJWT } from "jose";
+import { isAllowedRedirect, redirectMatches } from "./redirects.js";
+import { AuthentikError, AuthentikRejected, AuthentikUnavailable } from "./authentik.js";
+import { createSession, addPendingCreate, removeCleanup, recoverPendingCreates } from "./sessions.js";
+import { createAuthDebugLogger } from "./auth-debug.js";
 
-// Pending completions: after Authentik callback we redirect same-site to /oauth/complete
-// so the browser includes the XWiki session cookie (SameSite cookies blocked on cross-site redirect).
-const pendingCompletions = new Map();
-const PENDING_TTL = 5 * 60 * 1000;
+// Login flow: /authorize → Authentik → XWiki login (same origin) → /oauth/complete
+// → consent (once per user and client) → XWiki consent token → session → code.
+// The user's XWiki browser cookie is used only inside one request to create the
+// token and is never stored or logged.
 
-function storePendingCompletion(id, data) {
-  pendingCompletions.set(id, { ...data, expiresAt: Date.now() + PENDING_TTL });
+const FLOW_COOKIE = "xmcp_flow";
+// Routes are mounted under /mcp (see app.js); the cookie must reach callback/complete/consent.
+const FLOW_PATH = "/mcp/oauth";
+const STATE_TTL = 10 * 60 * 1000;
+const PENDING_TTL = 10 * 60 * 1000;
+const CODE_TTL = 5 * 60 * 1000;
+const MAX_FLOWS = 10000; // /authorize is anonymous: cap the in-memory state
+const TOKEN_DAYS = 90;
+const CHALLENGE_RE = /^[A-Za-z0-9_-]{43,128}$/;
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+class FlowFullError extends Error {}
+
+function ttlMap(now, ttl, max = Infinity) {
+  const m = new Map();
+  const sweep = () => {
+    const t = now();
+    for (const [k, e] of m) if (t > e.expiresAt) m.delete(k);
+  };
+  const get = (key) => {
+    if (typeof key !== "string") return null;
+    const e = m.get(key);
+    if (!e) return null;
+    if (now() > e.expiresAt) {
+      m.delete(key);
+      return null;
+    }
+    return e.value;
+  };
+  return {
+    put(key, value) {
+      sweep();
+      if (m.size >= max) throw new FlowFullError("too many pending flows");
+      m.set(key, { value, expiresAt: now() + ttl });
+    },
+    get,
+    take(key) {
+      const v = get(key);
+      if (v) m.delete(key);
+      return v;
+    },
+    delete: (key) => m.delete(key),
+  };
 }
 
-function consumePendingCompletion(id) {
-  const entry = pendingCompletions.get(id);
-  if (!entry) return null;
-  pendingCompletions.delete(id);
-  if (Date.now() > entry.expiresAt) return null;
-  return entry;
+const rand = () => randomBytes(32).toString("base64url");
+const str = (v) => (typeof v === "string" ? v : undefined);
+const own = (obj, key) => (obj && Object.hasOwn(obj, key) ? obj[key] : undefined);
+
+function safeEqual(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
 }
 
-export function createOAuthHandlers(cfg) {
+// Mapping Authentik → XWiki (test/fixtures/xwiki-18.7.0/README.md): preferred_username
+// without dots, lower-cased, e.g. "zurman.o" → "xwiki:XWiki.zurmano".
+export function expectedXWikiUser(username) {
+  return `xwiki:XWiki.${String(username).replace(/\./g, "").toLowerCase()}`;
+}
+
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+function redirectTargetLabel(uri) {
+  try {
+    const u = new URL(uri);
+    return LOOPBACK_HOSTS.has(u.hostname) ? "lokales Programm auf diesem Rechner" : u.origin;
+  } catch {
+    return "unbekannt";
+  }
+}
+
+function flowHeaders(res) {
+  res.set("Referrer-Policy", "no-referrer");
+  res.set("Cache-Control", "no-store");
+  res.set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'");
+  res.set("X-Frame-Options", "DENY");
+}
+
+function htmlPage(title, body) {
+  return `<!doctype html>
+<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(title)}</title>
+<style>body{font-family:system-ui,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem;line-height:1.5;color:#222}
+button{font-size:1rem;padding:.5rem 1.2rem;margin-right:.5rem}dt{font-weight:600}dd{margin:0 0 .6rem 0}</style>
+</head><body><h1>${esc(title)}</h1>${body}</body></html>`;
+}
+
+export function sendError(res, status, message, code) {
+  flowHeaders(res);
+  const detail = code ? `<p><small>Fehlercode: ${esc(code)}</small></p>` : "";
+  res.status(status).type("html").send(htmlPage("Anmeldung nicht möglich", `<p>${esc(message)}</p>${detail}`));
+}
+
+function redirectToClient(res, flow, params) {
+  const u = new URL(flow.redirectUri);
+  for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v);
+  u.searchParams.set("state", flow.clientState);
+  flowHeaders(res);
+  res.redirect(302, u.toString());
+}
+
+// The XWiki session cookie of this request, without our own flow cookie.
+function xwikiCookieOf(req) {
+  return String(req.headers.cookie || "")
+    .split(";")
+    .map((c) => c.trim())
+    .filter((c) => c && !c.startsWith(`${FLOW_COOKIE}=`))
+    .join("; ");
+}
+
+export function createOAuthHandlers(cfg, deps = {}) {
   const {
     mcpBaseUrl,
-    authentikIssuer,
-    oauthClientId,
-    oauthClientSecret,
-    oauthRedirectUri,
-    sessionSecret,
+    sessionSecret = "",
     store,
     extraRedirectUris = [],
   } = cfg;
+  const { authentik, xwikiTokens } = deps;
+  const now = deps.now || Date.now;
+  const logger = deps.logger || createAuthDebugLogger(cfg.authDebug);
+  const sessionDeps = { store, cfg, authentik, xwikiTokens, now };
 
   const jwtSecret = new TextEncoder().encode(sessionSecret);
+  const flows = ttlMap(now, STATE_TTL, MAX_FLOWS); // serverState → flow
+  const pendings = ttlMap(now, PENDING_TTL); // pendingId → { flow, sub, username, authentikRefresh }
+  const codes = ttlMap(now, CODE_TTL); // code → { sid, familyId, clientId, redirectUri, codeChallenge, resource }
+
+  // AUTH_DEBUG: event name, short sid, user and client name only (no request data).
+  const log = (event, extra = {}) => logger.info(event, undefined, extra);
+  const csrfFor = (pendingId) => createHmac("sha256", sessionSecret).update(`consent:${pendingId}`).digest("base64url");
+  const flowCookieMatches = (req, flow) => safeEqual(req.cookies?.[FLOW_COOKIE], flow.flowId);
+  const clearFlowCookie = (res) => res.clearCookie(FLOW_COOKIE, { secure: true, httpOnly: true, sameSite: "lax", path: FLOW_PATH });
 
   const register = async (req, res) => {
     const body = req.body;
@@ -56,11 +167,11 @@ export function createOAuthHandlers(cfg) {
     }
     const clientName = (body.client_name || "").trim().slice(0, 200) || "unbenannter Client";
     const clientId = randomUUID();
-    const now = Date.now();
+    const ts = Date.now();
     try {
       await store.mutate((state) => {
         state.clients[clientId] = {
-          clientId, clientName, redirectUris: [...uris], createdAt: now, lastUsedAt: now,
+          clientId, clientName, redirectUris: [...uris], createdAt: ts, lastUsedAt: ts,
         };
       });
     } catch (e) {
@@ -69,7 +180,7 @@ export function createOAuthHandlers(cfg) {
     }
     res.status(201).json({
       client_id: clientId,
-      client_id_issued_at: Math.floor(now / 1000),
+      client_id_issued_at: Math.floor(ts / 1000),
       client_name: clientName,
       redirect_uris: uris,
       token_endpoint_auth_method: "none",
@@ -79,144 +190,296 @@ export function createOAuthHandlers(cfg) {
   };
 
   const authorize = (req, res) => {
-    const { response_type, client_id, redirect_uri, state, code_challenge, code_challenge_method } = req.query;
+    flowHeaders(res);
+    if (!store || !authentik) return sendError(res, 500, "Der Server ist nicht vollständig eingerichtet.", "server_error");
+    const q = req.query;
+    const clientId = str(q.client_id);
+    const redirectUri = str(q.redirect_uri);
+    const client = clientId ? own(store.read().clients, clientId) : undefined;
+    if (!client) return sendError(res, 400, "Das Programm ist hier nicht registriert. Bitte die Verbindung im Programm neu einrichten.", "invalid_client");
+    if (!redirectUri || !redirectMatches(client.redirectUris, redirectUri)) {
+      return sendError(res, 400, "Die Rückleitungsadresse passt nicht zum registrierten Programm.", "invalid_request");
+    }
+    if (q.response_type !== "code") return sendError(res, 400, "Nicht unterstützte Anfrage.", "unsupported_response_type");
+    const codeChallenge = str(q.code_challenge);
+    if (q.code_challenge_method !== "S256" || !codeChallenge || !CHALLENGE_RE.test(codeChallenge)) {
+      return sendError(res, 400, "Die Anfrage enthält keinen gültigen PKCE-Wert (S256).", "invalid_request");
+    }
+    const clientState = str(q.state);
+    if (!clientState || clientState.length > 2048) return sendError(res, 400, "Die Anfrage enthält keinen gültigen state-Wert.", "invalid_request");
+    let resource;
+    if (q.resource !== undefined) {
+      resource = str(q.resource);
+      if (!resource || resource.replace(/\/$/, "") !== mcpBaseUrl) {
+        return sendError(res, 400, "Die angefragte Ressource ist auf diesem Server nicht verfügbar.", "invalid_target");
+      }
+      resource = mcpBaseUrl;
+    }
 
-    if (response_type !== "code") return res.status(400).json({ error: "unsupported_response_type" });
-    if (code_challenge_method !== "S256") return res.status(400).json({ error: "invalid_request", error_description: "Only S256 PKCE supported" });
-    if (!code_challenge || !state || !redirect_uri) return res.status(400).json({ error: "invalid_request" });
-
-    const serverState = randomUUID();
-    storeAuthState(serverState, { clientState: state, redirect_uri, code_challenge, client_id });
-
-    const params = new URLSearchParams({
-      response_type: "code",
-      client_id: oauthClientId,
-      redirect_uri: oauthRedirectUri,
-      scope: "openid profile email",
-      state: serverState,
-      nonce: randomBytes(16).toString("hex"),
-    });
-
-    res.redirect(`${authentikIssuer}/application/o/authorize/?${params}`);
+    const serverState = rand();
+    const flowId = rand();
+    const nonce = randomBytes(16).toString("hex");
+    try {
+      flows.put(serverState, { clientId, redirectUri, codeChallenge, clientState, resource, nonce, flowId });
+    } catch (e) {
+      if (e instanceof FlowFullError) return sendError(res, 503, "Zu viele offene Anmeldungen. Bitte später erneut versuchen.", "temporarily_unavailable");
+      throw e;
+    }
+    res.cookie(FLOW_COOKIE, flowId, { secure: true, httpOnly: true, sameSite: "lax", path: FLOW_PATH, maxAge: STATE_TTL });
+    log("authorize_start", { client: client.clientName });
+    res.redirect(302, authentik.authorizeUrl({ state: serverState, nonce }));
   };
+
+  function authentikFailure(res, e) {
+    if (e instanceof AuthentikUnavailable) return sendError(res, 503, "Die Anmeldung (Authentik) ist gerade nicht erreichbar. Bitte später erneut versuchen.", "temporarily_unavailable");
+    if (e instanceof AuthentikRejected) return sendError(res, 403, "Ihr Konto ist für den Zugriff auf XWiki über MCP nicht freigeschaltet.", "access_denied");
+    if (e instanceof AuthentikError) return sendError(res, 400, "Die Anmeldung bei Authentik ist fehlgeschlagen. Bitte im Programm erneut verbinden.", "invalid_grant");
+    console.error("[login] unexpected error during Authentik login");
+    return sendError(res, 500, "Interner Fehler bei der Anmeldung.", "server_error");
+  }
 
   const callback = async (req, res) => {
-    const { code, state, error } = req.query;
-    if (error) return res.status(400).send("Auth error. Please try again.");
+    flowHeaders(res);
+    const state = str(req.query.state);
+    const flow = state ? flows.take(state) : null;
+    if (!flow) return sendError(res, 400, "Die Anmeldung ist abgelaufen oder ungültig. Bitte im Programm erneut verbinden.", "invalid_request");
+    if (!flowCookieMatches(req, flow)) {
+      return sendError(res, 400, "Die Anmeldung wurde in einem anderen Browser begonnen. Bitte im Programm erneut verbinden.", "invalid_request");
+    }
+    if (req.query.error !== undefined) return redirectToClient(res, flow, { error: "access_denied" });
+    const code = str(req.query.code);
+    if (!code) return sendError(res, 400, "Authentik hat keinen Anmeldecode geliefert.", "invalid_request");
 
-    const authData = consumeAuthState(state);
-    if (!authData) return res.status(400).send("Invalid or expired state parameter.");
-
-    let userId;
+    let ak;
     try {
-      const tokenRes = await fetch(`${authentikIssuer}/application/o/token/`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          grant_type: "authorization_code",
-          code,
-          redirect_uri: oauthRedirectUri,
-          client_id: oauthClientId,
-          client_secret: oauthClientSecret,
-        }),
-      });
-      if (!tokenRes.ok) throw new Error(`status ${tokenRes.status}`);
-      const tokens = await tokenRes.json();
-      const claims = decodeJwt(tokens.id_token);
-      userId = String(claims.preferred_username || claims.email || claims.sub || randomUUID());
-    } catch {
-      return res.status(502).send("Failed to complete authentication. Please try again.");
+      ak = await authentik.exchangeCode(code, flow.nonce);
+      await authentik.checkUser(ak.accessToken);
+    } catch (e) {
+      log("authentik_failed", { error: e?.code || "error" });
+      return authentikFailure(res, e);
     }
 
-    // Redirect through XWiki's SSO login to establish a XWiki session before /oauth/complete.
-    // The browser has no JSESSIONID yet (Authentik session ≠ XWiki session). XWiki's
-    // logincheck action detects the active Authentik SSO session, creates a JSESSIONID,
-    // then follows xredirect to /oauth/complete — which captures the real XWiki cookie.
-    const pendingId = randomUUID();
-    storePendingCompletion(pendingId, {
-      userId,
-      codeChallenge: authData.code_challenge,
-      redirectUri: authData.redirect_uri,
-      clientState: authData.clientState,
-    });
+    // XWiki's logincheck turns the Authentik SSO session into a XWiki session (cookie),
+    // then follows xredirect same-origin to /oauth/complete, where that cookie arrives.
+    const pendingId = rand();
+    pendings.put(pendingId, { flow, sub: ak.sub, username: ak.username, authentikRefresh: ak.refreshToken });
     const xwikiOrigin = new URL(mcpBaseUrl).origin;
-    const completeUrl = `/mcp/oauth/complete?t=${pendingId}`;
-    res.redirect(`${xwikiOrigin}/bin/login/XWiki/XWikiLogin?xredirect=${encodeURIComponent(completeUrl)}`);
+    const completeUrl = `${FLOW_PATH}/complete?t=${pendingId}`;
+    res.redirect(302, `${xwikiOrigin}/bin/login/XWiki/XWikiLogin?xredirect=${encodeURIComponent(completeUrl)}`);
   };
 
-  const complete = (req, res) => {
-    const pending = consumePendingCompletion(req.query.t);
-    if (!pending) return res.status(400).send("Invalid or expired session completion token.");
+  // Returns the XWiki user of the cookie if it is the expected one; otherwise answers with an
+  // error page, drops the pending login and returns null.
+  async function verifyIdentity(res, pendingId, pending, cookie) {
+    const expected = expectedXWikiUser(pending.username);
+    let actual;
+    try {
+      actual = cookie ? await xwikiTokens.whoami({ cookie }) : null;
+    } catch (e) {
+      pendings.delete(pendingId);
+      if (e?.code === "unavailable") {
+        sendError(res, 503, "XWiki ist gerade nicht erreichbar. Bitte später erneut versuchen.", "temporarily_unavailable");
+      } else {
+        sendError(res, 502, "XWiki hat unerwartet geantwortet. Bitte im Programm erneut verbinden.", "server_error");
+      }
+      return null;
+    }
+    if (actual !== expected) {
+      pendings.delete(pendingId);
+      log("identity_mismatch", { user: expected });
+      sendError(res, 403, "Die XWiki-Anmeldung in diesem Browser gehört nicht zum angemeldeten Konto. Bitte in XWiki ab- und neu anmelden und dann erneut verbinden.", "access_denied");
+      return null;
+    }
+    return actual;
+  }
 
-    // Same-site request — XWiki session cookie is present here.
-    const xwikiCookie = req.headers.cookie || "";
-    const sessionId = createSession(pending.userId, xwikiCookie);
+  function consentPage(res, pendingId, pending, xwikiUser, client) {
+    flowHeaders(res);
+    const body = `<p>Ein Programm möchte in Ihrem Namen auf XWiki zugreifen.</p>
+<dl>
+<dt>Angemeldet als</dt><dd>${esc(pending.username)} (${esc(xwikiUser)})</dd>
+<dt>Programm</dt><dd>${esc(client.clientName)} (nicht geprüft)</dd>
+<dt>Rückleitung an</dt><dd>${esc(redirectTargetLabel(pending.flow.redirectUri))}</dd>
+</dl>
+<p>Das Programm kann danach alles lesen und ändern, was Sie in XWiki lesen und ändern dürfen. Die Freigabe erscheint in XWiki in Ihrem Profil unter „Applications“ und kann dort widerrufen werden.</p>
+<form method="post" action="${FLOW_PATH}/consent">
+<input type="hidden" name="t" value="${esc(pendingId)}">
+<input type="hidden" name="csrf" value="${esc(csrfFor(pendingId))}">
+<button type="submit" name="action" value="allow">Zulassen</button>
+<button type="submit" name="action" value="deny">Abbrechen</button>
+</form>`;
+    res.status(200).type("html").send(htmlPage("Zugriff auf XWiki erlauben?", body));
+  }
 
-    const mcpCode = randomUUID();
-    storeAuthCode(mcpCode, sessionId, pending.codeChallenge);
+  // Shared by both ways in (grant present / consent given). Serialized per XWiki user so the
+  // pending-create recovery never mistakes an in-flight token of the same name for a leftover.
+  async function finish(res, pending, xwikiUser, cookie, client) {
+    const { flow } = pending;
+    return store.withLock(`xwiki-user:${xwikiUser}`, async () => {
+      await recoverPendingCreates(sessionDeps, { cookie, xwikiUser });
+      const appName = `xwiki-mcp – ${client.clientName} – ${new Date(now()).toISOString().slice(0, 10)}`;
+      let cleanupId;
+      try {
+        cleanupId = await addPendingCreate(sessionDeps, { xwikiUser, appName });
+      } catch {
+        console.error("[login] store write failed (pending-create)");
+        return sendError(res, 500, "Interner Fehler beim Speichern. Bitte erneut verbinden.", "server_error");
+      }
+      let created;
+      try {
+        created = await xwikiTokens.createToken({ cookie }, { xwikiUser, appName, days: TOKEN_DAYS });
+      } catch (e) {
+        const code = e?.code || "error";
+        console.warn(`[login] XWiki token creation failed: ${code}`);
+        if (code === "login_required") {
+          // Nothing was created: drop the marker.
+          try {
+            await removeCleanup(sessionDeps, cleanupId);
+          } catch {
+            console.error("[login] store write failed (drop pending-create)");
+          }
+          return sendError(res, 403, "Ihre XWiki-Anmeldung ist abgelaufen. Bitte im Programm erneut verbinden.", "login_required");
+        }
+        if (code === "unavailable") return sendError(res, 503, "XWiki ist gerade nicht erreichbar. Bitte später erneut verbinden.", "temporarily_unavailable");
+        return sendError(res, 502, "XWiki konnte keinen Zugang anlegen. Bitte erneut verbinden.", "server_error");
+      }
+      let session;
+      try {
+        session = await createSession(sessionDeps, {
+          sub: pending.sub,
+          userId: pending.username,
+          xwikiUser,
+          clientId: flow.clientId,
+          authentikRefresh: pending.authentikRefresh,
+          xwikiToken: created.token,
+          consentId: created.consentId,
+          tokenExpiresAt: created.expiresAt,
+          pendingCleanupId: cleanupId,
+        });
+      } catch {
+        console.error("[login] store write failed (session)");
+        return sendError(res, 500, "Interner Fehler beim Speichern. Bitte erneut verbinden.", "server_error");
+      }
+      const code = rand();
+      codes.put(code, {
+        sid: session.sid,
+        familyId: session.familyId,
+        clientId: flow.clientId,
+        redirectUri: flow.redirectUri,
+        codeChallenge: flow.codeChallenge,
+        resource: flow.resource,
+      });
+      log("login_complete", { sid: session.sid.slice(0, 8), user: xwikiUser, client: client.clientName });
+      clearFlowCookie(res);
+      redirectToClient(res, flow, { code });
+    });
+  }
 
-    const redirectParams = new URLSearchParams({ code: mcpCode, state: pending.clientState });
-    res.redirect(`${pending.redirectUri}?${redirectParams}`);
+  const complete = async (req, res) => {
+    flowHeaders(res);
+    const t = str(req.query.t);
+    const pending = t ? pendings.get(t) : null;
+    if (!pending) return sendError(res, 400, "Die Anmeldung ist abgelaufen oder ungültig. Bitte im Programm erneut verbinden.", "invalid_request");
+    if (!flowCookieMatches(req, pending.flow)) {
+      return sendError(res, 400, "Die Anmeldung wurde in einem anderen Browser begonnen. Bitte im Programm erneut verbinden.", "invalid_request");
+    }
+    const cookie = xwikiCookieOf(req);
+    const xwikiUser = await verifyIdentity(res, t, pending, cookie);
+    if (!xwikiUser) return;
+    const state = store.read();
+    const client = own(state.clients, pending.flow.clientId);
+    if (!client) {
+      pendings.delete(t);
+      return sendError(res, 400, "Das Programm ist nicht mehr registriert.", "invalid_client");
+    }
+    if (own(state.grants, `${pending.sub}|${pending.flow.clientId}`)) {
+      pendings.delete(t);
+      return finish(res, pending, xwikiUser, cookie, client);
+    }
+    log("consent_shown", { user: xwikiUser, client: client.clientName });
+    return consentPage(res, t, pending, xwikiUser, client);
   };
 
+  const consent = async (req, res) => {
+    flowHeaders(res);
+    const t = str(req.body?.t);
+    const pending = t ? pendings.get(t) : null;
+    if (!pending) return sendError(res, 400, "Die Anmeldung ist abgelaufen oder ungültig. Bitte im Programm erneut verbinden.", "invalid_request");
+    if (!flowCookieMatches(req, pending.flow) || !safeEqual(str(req.body?.csrf), csrfFor(t))) {
+      return sendError(res, 403, "Die Bestätigung ist ungültig. Bitte im Programm erneut verbinden.", "access_denied");
+    }
+    const action = str(req.body?.action);
+    if (action !== "allow" && action !== "deny") return sendError(res, 400, "Ungültige Auswahl.", "invalid_request");
+    pendings.delete(t);
+    if (action === "deny") {
+      log("consent_denied", {});
+      clearFlowCookie(res);
+      return redirectToClient(res, pending.flow, { error: "access_denied" });
+    }
+    const cookie = xwikiCookieOf(req);
+    const xwikiUser = await verifyIdentity(res, t, pending, cookie);
+    if (!xwikiUser) return;
+    const client = own(store.read().clients, pending.flow.clientId);
+    if (!client) return sendError(res, 400, "Das Programm ist nicht mehr registriert.", "invalid_client");
+    try {
+      await store.mutate((state) => {
+        state.grants[`${pending.sub}|${pending.flow.clientId}`] = { at: now() };
+      });
+    } catch {
+      console.error("[login] store write failed (grant)");
+      return sendError(res, 500, "Interner Fehler beim Speichern. Bitte erneut verbinden.", "server_error");
+    }
+    log("consent_granted", { user: xwikiUser, client: client.clientName });
+    return finish(res, pending, xwikiUser, cookie, client);
+  };
+
+  // Single-use authorization codes (5 min); the /token rewrite (Task 9) consumes them.
+  const consumeCode = (code) => codes.take(code);
+
+  // Interim code exchange until Task 9 replaces it with refresh/access tokens.
   const token = async (req, res) => {
-    const { grant_type, code, code_verifier } = req.body;
-    if (grant_type !== "authorization_code") {
-      return res.status(400).json({ error: "unsupported_grant_type" });
-    }
-    if (!code || !code_verifier) {
-      return res.status(400).json({ error: "invalid_request" });
-    }
-
-    const codeData = consumeAuthCode(code);
-    if (!codeData) return res.status(400).json({ error: "invalid_grant" });
-
+    res.set("Cache-Control", "no-store");
+    res.set("Pragma", "no-cache");
+    const { grant_type, code, code_verifier, client_id, redirect_uri } = req.body || {};
+    if (grant_type !== "authorization_code") return res.status(400).json({ error: "unsupported_grant_type" });
+    if (typeof code !== "string" || typeof code_verifier !== "string") return res.status(400).json({ error: "invalid_request" });
+    const data = consumeCode(code);
+    if (!data) return res.status(400).json({ error: "invalid_grant" });
     const computed = createHash("sha256").update(code_verifier).digest("base64url");
-    if (computed !== codeData.codeChallenge) {
+    if (!safeEqual(computed, data.codeChallenge)) return res.status(400).json({ error: "invalid_grant" });
+    if ((client_id !== undefined && client_id !== data.clientId) || (redirect_uri !== undefined && redirect_uri !== data.redirectUri)) {
       return res.status(400).json({ error: "invalid_grant" });
     }
-
-    const session = getSession(codeData.sessionId);
+    const session = store ? own(store.read().sessions, data.sid) : undefined;
     if (!session) return res.status(400).json({ error: "invalid_grant" });
-
-    const accessToken = await new SignJWT({ sub: session.userId, sid: codeData.sessionId })
+    const accessToken = await new SignJWT({ sub: session.userId, sid: data.sid })
       .setProtectedHeader({ alg: "HS256" })
       .setExpirationTime("7d")
       .setIssuedAt()
       .sign(jwtSecret);
-
-    res.json({
-      access_token: accessToken,
-      token_type: "Bearer",
-      expires_in: 7 * 24 * 3600,
-    });
+    res.json({ access_token: accessToken, token_type: "Bearer", expires_in: 7 * 24 * 3600 });
   };
 
-  const logout = async (req, res) => {
-    const auth = req.headers.authorization || "";
-    const tok = auth.startsWith("Bearer ") ? auth.slice(7) : null;
-    if (tok) {
-      try {
-        const { payload } = await jwtVerify(tok, jwtSecret);
-        if (payload.sid) deleteSession(payload.sid);
-      } catch { /* expired or invalid, nothing to clean up */ }
-    }
-    res.json({ message: "Logged out." });
-  };
+  const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-  return { register, authorize, callback, complete, token, logout };
+  return {
+    register,
+    authorize,
+    callback: wrap(callback),
+    complete: wrap(complete),
+    consent: wrap(consent),
+    token: wrap(token),
+    consumeCode,
+  };
 }
 
-export function createOAuthRouter(cfg) {
-  const h = createOAuthHandlers(cfg);
+export function createOAuthRouter(h) {
   const router = Router();
-
   router.post("/oauth/register", h.register);
   router.get("/oauth/authorize", h.authorize);
   router.get("/oauth/callback", h.callback);
   router.get("/oauth/complete", h.complete);
+  router.post("/oauth/consent", h.consent);
   router.post("/oauth/token", h.token);
-  router.get("/oauth/logout", h.logout);
-
   return router;
 }

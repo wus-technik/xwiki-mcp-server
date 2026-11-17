@@ -59,7 +59,7 @@ test("exchangeCode: gueltiges ID-Token", async () => {
     return json(200, { id_token: await idToken(), refresh_token: "rt1", access_token: "at" });
   });
   const r = await a.exchangeCode("code1", "n1");
-  assert.deepEqual(r, { sub: "sub-1", username: "alice", refreshToken: "rt1" });
+  assert.deepEqual(r, { sub: "sub-1", username: "alice", refreshToken: "rt1", accessToken: "at" });
   assert.equal(call.url, `${ISSUER}/application/o/token/`);
   assert.equal(call.init.method, "POST");
   assert.match(call.init.headers["Content-Type"], /x-www-form-urlencoded/);
@@ -93,6 +93,11 @@ test("exchangeCode: fehlendes preferred_username -> invalid_id_token", async () 
 test("exchangeCode: ohne refresh_token -> no_refresh_token", async () => {
   const a = make(async () => json(200, { id_token: await idToken() }));
   await assert.rejects(a.exchangeCode("c", "n1"), (e) => e instanceof AuthentikError && e.code === "no_refresh_token");
+});
+
+test("exchangeCode: ohne access_token -> no_access_token", async () => {
+  const a = make(async () => json(200, { id_token: await idToken(), refresh_token: "rt" }));
+  await assert.rejects(a.exchangeCode("c", "n1"), (e) => e instanceof AuthentikError && e.code === "no_access_token");
 });
 
 test("exchangeCode: non-2xx -> exchange_failed, Netzfehler/Timeout -> Unavailable, ohne Geheimnisse", async () => {

@@ -2,30 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import request from "supertest";
 import express from "express";
-import { createOAuthRouter } from "../src/oauth.js";
 import { mountMetadata } from "../src/metadata.js";
 import { createAuthMiddleware } from "../src/auth-middleware.js";
 import { createSession } from "../src/session-store.js";
 import { createApp } from "../src/app.js";
 import { getSession } from "../src/session-store.js";
 import { XWikiAuthError } from "../src/xwiki-client.js";
-
-function makeTestApp(overrides = {}) {
-  const app = express();
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: false }));
-  const router = createOAuthRouter({
-    mcpBaseUrl: "https://mcp.example.com",
-    authentikIssuer: "https://auth.example.com",
-    oauthClientId: "client_id",
-    oauthClientSecret: "client_secret",
-    oauthRedirectUri: "https://mcp.example.com/oauth/callback",
-    sessionSecret: "test-secret-32-chars-minimum-pad",
-    ...overrides,
-  });
-  app.use(router);
-  return app;
-}
 
 test("GET /.well-known/oauth-protected-resource returns resource metadata", async () => {
   const app = express();
@@ -48,28 +30,7 @@ test("GET /.well-known/oauth-authorization-server returns AS metadata", async ()
   assert.deepEqual(res.body.grant_types_supported, ["authorization_code", "refresh_token"]);
 });
 
-test("GET /oauth/authorize with missing params returns 400", async () => {
-  const app = makeTestApp();
-  const res = await request(app).get("/oauth/authorize?response_type=code");
-  assert.equal(res.status, 400);
-});
-
-test("GET /oauth/authorize with valid params redirects to Authentik", async () => {
-  const app = makeTestApp();
-  const res = await request(app).get("/oauth/authorize").query({
-    response_type: "code",
-    client_id: "mcp-client",
-    redirect_uri: "http://localhost:9000/callback",
-    state: "client-state-123",
-    code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
-    code_challenge_method: "S256",
-  });
-  assert.equal(res.status, 302);
-  assert.ok(res.headers.location.startsWith("https://auth.example.com/application/o/authorize/"));
-  const url = new URL(res.headers.location);
-  assert.equal(url.searchParams.get("response_type"), "code");
-  assert.equal(url.searchParams.get("client_id"), "client_id");
-});
+// The login flow (/authorize → callback → complete → consent) is covered in login-flow.test.js.
 
 test("auth middleware rejects missing Authorization header with 401", async () => {
   const app = express();
