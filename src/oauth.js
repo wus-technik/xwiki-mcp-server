@@ -59,14 +59,21 @@ export function createOAuthHandlers(cfg) {
   const register = async (req, res) => {
     const body = req.body;
     const uris = body && typeof body === "object" ? body.redirect_uris : undefined;
-    if (!Array.isArray(uris) || uris.length === 0 || uris.length > 20) {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
       return res.status(400).json({ error: "invalid_client_metadata" });
+    }
+    if (!Array.isArray(uris) || uris.length === 0 || uris.length > 20) {
+      return res.status(400).json({ error: "invalid_redirect_uri" });
     }
     if (body.client_name !== undefined && typeof body.client_name !== "string") {
       return res.status(400).json({ error: "invalid_client_metadata" });
     }
     if (!uris.every((u) => typeof u === "string" && isAllowedRedirect(u, extraRedirectUris))) {
       return res.status(400).json({ error: "invalid_redirect_uri" });
+    }
+    if (!store) {
+      console.error("[register] no store configured");
+      return res.status(500).json({ error: "server_error" });
     }
     const clientName = (body.client_name || "").trim().slice(0, 200) || "unbenannter Client";
     const clientId = randomUUID();

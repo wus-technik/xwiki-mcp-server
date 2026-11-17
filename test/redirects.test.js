@@ -22,6 +22,11 @@ test("isAllowedRedirect rejects others", () => {
     "https://localhost:3000/cb",
     "javascript:alert(1)",
     "http://localhost:3000/a/%2e%2e/b",
+    "http://@localhost:3/cb",
+    "http://:@localhost:3/cb",
+    "HTTP://LOCALHOST:4/cb",
+    "http://127.1:4/cb",
+    "http://Localhost:4/cb",
     "",
     null,
   ]) assert.equal(isAllowedRedirect(u, []), false, String(u));
@@ -40,6 +45,16 @@ test("redirectMatches: loopback ignores only the port", () => {
   assert.equal(redirectMatches(reg, "http://127.0.0.1:3118/callback"), false);
   assert.equal(redirectMatches(reg, "http://localhost:4000/callback?x=1"), false);
   assert.equal(redirectMatches(reg, "https://localhost:4000/callback"), false);
+});
+
+test("redirectMatches: loopback compares raw components except the port", () => {
+  const reg = ["http://localhost:3/cb"];
+  assert.equal(redirectMatches(reg, "HTTP://LOCALHOST:4/cb"), false);
+  assert.equal(redirectMatches(reg, "http://localhost:4/cb?"), false);
+  assert.equal(redirectMatches(["http://127.0.0.1:3/cb"], "http://127.1:4/cb"), false);
+  assert.equal(redirectMatches(["http://localhost:4/"], "http://localhost:3"), false);
+  assert.equal(redirectMatches(["http://localhost:4/"], "http://localhost/"), true);
+  assert.equal(redirectMatches(reg, "http://@localhost:4/cb"), false);
 });
 
 test("redirectMatches: non-loopback is exact", () => {

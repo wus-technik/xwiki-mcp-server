@@ -105,5 +105,12 @@ export function createApp(overrides = {}) {
   app.use("/mcp", mcpRouter);
   app.locals.xwikiClient = xwikiClient;
 
+  // Body-parser failures (malformed JSON etc.) answer JSON, not Express's HTML page.
+  app.use((err, req, res, next) => {
+    if (res.headersSent || !err || typeof err.status !== "number" || err.status < 400 || err.status >= 500 || !err.type) return next(err);
+    const isRegister = req.path === "/register" || req.path === "/mcp/oauth/register";
+    res.status(err.status).json({ error: isRegister ? "invalid_client_metadata" : "invalid_request" });
+  });
+
   return app;
 }

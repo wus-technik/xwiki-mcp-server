@@ -43,16 +43,61 @@ for (const url of ["/register", "/mcp/oauth/register"]) {
   });
 }
 
-test("malformed metadata gives invalid_client_metadata", async () => {
+test("bad redirect_uris give invalid_redirect_uri", async () => {
   const { app } = mk();
-  for (const body of [{}, { redirect_uris: "x" }, { redirect_uris: [] }, { redirect_uris: ["http://localhost:1/a"], client_name: 5 }]) {
+  const many = Array.from({ length: 21 }, (_, i) => `http://localhost:${i + 1}/a`);
+  for (const body of [{}, { redirect_uris: "x" }, { redirect_uris: [] }, { redirect_uris: [1] }, { redirect_uris: many }]) {
     const res = await request(app).post("/register").send(body);
-    assert.equal(res.status, 400, JSON.stringify(body));
-    assert.equal(res.body.error, "invalid_client_metadata", JSON.stringify(body));
+    assert.equal(res.status, 400, JSON.stringify(body).slice(0, 40));
+    assert.deepEqual(res.body, { error: "invalid_redirect_uri" });
   }
-  const res = await request(app).post("/register").send({ redirect_uris: [1] });
+});
+
+test("bad client_name type gives invalid_client_metadata", async () => {
+  const { app } = mk();
+  const res = await request(app).post("/register").send({ redirect_uris: ["http://localhost:1/a"], client_name: 5 });
   assert.equal(res.status, 400);
-  assert.equal(res.body.error, "invalid_redirect_uri");
+  assert.equal(res.body.error, "invalid_client_metadata");
+});
+
+for (const url of ["/register", "/mcp/oauth/register"]) {
+  test(`malformed JSON on ${url} gives JSON 400`, async () => {
+    const { app } = mk();
+    const res = await request(app).post(url).set("Content-Type", "application/json").send("{");
+    assert.equal(res.status, 400);
+    assert.match(res.headers["content-type"], /json/);
+    assert.equal(res.body.error, "invalid_client_metadata");
+  });
+}
+
+test("malformed JSON elsewhere gives invalid_request", async () => {
+  const { app } = mk();
+  const res = await request(app).post("/token").set("Content-Type", "application/json").send("{");
+  assert.equal(res.status, 400);
+  assert.deepEqual(res.body, { error: "invalid_request" });
+});
+
+test("201 is sent only after the write resolved", async () => {
+  const { store } = mk();
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const slow = { ...store, mutate: async (fn) => { await gate; return store.mutate(fn); } };
+  const { app } = mk(slow);
+  let done = false;
+  const p = request(app).post("/register").send({ redirect_uris: ["http://localhost:1/a"] }).then((r) => { done = true; return r; });
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(done, false);
+  release();
+  const res = await p;
+  assert.equal(res.status, 201);
+  assert.ok(store.read().clients[res.body.client_id]);
+});
+
+test("missing store gives 500, no client_id", async () => {
+  const app = createApp({ sessionSecret: "test-secret-32-chars-minimum-pad", extraRedirectUris: [] });
+  const res = await request(app).post("/register").send({ redirect_uris: ["http://localhost:1/a"] });
+  assert.equal(res.status, 500);
+  assert.equal(res.body.client_id, undefined);
 });
 
 test("long client_name is truncated, default name applied", async () => {

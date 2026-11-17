@@ -17,6 +17,8 @@ function parseRedirect(raw) {
   if (u.protocol !== "http:" && u.protocol !== "https:") return null;
   if (u.hash || raw.includes("#")) return null;
   if (u.username || u.password) return null;
+  const authority = raw.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").split(/[/?#]/)[0];
+  if (authority.includes("@")) return null;
   // new URL() resolves dot segments; reject them in the raw input instead.
   const afterAuthority = raw.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i, "");
   const rawPath = afterAuthority.split("?")[0];
@@ -24,30 +26,28 @@ function parseRedirect(raw) {
   return u;
 }
 
-function isLoopback(u) {
-  return u.protocol === "http:" && LOOPBACK_HOSTS.has(u.hostname);
+// Loopback per RFC 8252: literal lowercase "http://localhost" or "http://127.0.0.1",
+// optional numeric port; returns the raw parts, port excluded.
+function loopbackParts(raw) {
+  if (!parseRedirect(raw)) return null;
+  const m = /^http:\/\/(localhost|127\.0\.0\.1)(?::(\d{1,5}))?(?=[/?]|$)(.*)$/s.exec(raw);
+  return m ? { host: m[1], rest: m[3] } : null;
 }
 
 export function isAllowedRedirect(uri, extra = []) {
-  const u = parseRedirect(uri);
-  if (!u) return false;
-  if (isLoopback(u)) return true;
+  if (!parseRedirect(uri)) return false;
+  if (loopbackParts(uri)) return true;
   if (FIXED_REDIRECTS.includes(uri)) return true;
   return extra.includes(uri);
 }
 
 export function redirectMatches(registered, requested) {
-  const req = parseRedirect(requested);
-  if (!req || !Array.isArray(registered)) return false;
+  if (!parseRedirect(requested) || !Array.isArray(registered)) return false;
+  const req = loopbackParts(requested);
   return registered.some((r) => {
-    const reg = parseRedirect(r);
-    if (!reg) return false;
-    if (isLoopback(reg)) {
-      return isLoopback(req)
-        && reg.hostname === req.hostname
-        && reg.pathname === req.pathname
-        && reg.search === req.search;
-    }
+    if (!parseRedirect(r)) return false;
+    const reg = loopbackParts(r);
+    if (reg) return !!req && reg.host === req.host && reg.rest === req.rest;
     return r === requested;
   });
 }

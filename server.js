@@ -16,11 +16,13 @@ let store;
 try {
   store = openStore({ file: cfg.storeFile, key: cfg.tokenEncKey });
 } catch (e) {
-  console.error(`[store] ${e.message}`);
+  console.error(`[store] cannot open STORE_FILE ${cfg.storeFile}: ${e.message}`);
   process.exit(1);
 }
 
-configureSessionPersistence(cfg.storeFile);
+// Legacy session store stays memory-only (STORE_FILE belongs to the encrypted store);
+// removed together with the legacy store in a later task.
+configureSessionPersistence();
 
 const app = createApp({ ...cfg, store });
 startKeepAlive({ xwikiClient: app.locals.xwikiClient });
