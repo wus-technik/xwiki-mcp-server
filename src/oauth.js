@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { randomUUID, createHash, randomBytes } from "node:crypto";
 import { SignJWT, jwtVerify, decodeJwt } from "jose";
+import { isAllowedRedirect } from "./redirects.js";
 import { storeAuthState, consumeAuthState, storeAuthCode, consumeAuthCode, createSession, getSession, deleteSession } from "./session-store.js";
 
 // Pending completions: after Authentik callback we redirect same-site to /oauth/complete
@@ -28,6 +29,8 @@ export function createOAuthHandlers(cfg) {
     oauthClientSecret,
     oauthRedirectUri,
     sessionSecret,
+    store,
+    extraRedirectUris = [],
   } = cfg;
 
   const jwtSecret = new TextEncoder().encode(sessionSecret);
@@ -53,12 +56,39 @@ export function createOAuthHandlers(cfg) {
     });
   };
 
-  const register = (req, res) => {
+  const register = async (req, res) => {
+    const body = req.body;
+    const uris = body && typeof body === "object" ? body.redirect_uris : undefined;
+    if (!Array.isArray(uris) || uris.length === 0 || uris.length > 20) {
+      return res.status(400).json({ error: "invalid_client_metadata" });
+    }
+    if (body.client_name !== undefined && typeof body.client_name !== "string") {
+      return res.status(400).json({ error: "invalid_client_metadata" });
+    }
+    if (!uris.every((u) => typeof u === "string" && isAllowedRedirect(u, extraRedirectUris))) {
+      return res.status(400).json({ error: "invalid_redirect_uri" });
+    }
+    const clientName = (body.client_name || "").trim().slice(0, 200) || "unbenannter Client";
+    const clientId = randomUUID();
+    const now = Date.now();
+    try {
+      await store.mutate((state) => {
+        state.clients[clientId] = {
+          clientId, clientName, redirectUris: [...uris], createdAt: now, lastUsedAt: now,
+        };
+      });
+    } catch (e) {
+      console.error("[register] store write failed:", e.message);
+      return res.status(500).json({ error: "server_error" });
+    }
     res.status(201).json({
-      ...req.body,
-      client_id: randomUUID(),
-      client_id_issued_at: Math.floor(Date.now() / 1000),
-      client_secret_expires_at: 0,
+      client_id: clientId,
+      client_id_issued_at: Math.floor(now / 1000),
+      client_name: clientName,
+      redirect_uris: uris,
+      token_endpoint_auth_method: "none",
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
     });
   };
 

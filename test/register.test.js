@@ -1,0 +1,74 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import request from "supertest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { createApp } from "../src/app.js";
+import { openStore } from "../src/store.js";
+
+const KEY = Buffer.alloc(32, 7);
+const mk = (storeOverride) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "reg-"));
+  const store = storeOverride ?? openStore({ file: path.join(dir, "s.json"), key: KEY });
+  const app = createApp({ sessionSecret: "test-secret-32-chars-minimum-pad", store, extraRedirectUris: [] });
+  return { app, store };
+};
+
+for (const url of ["/register", "/mcp/oauth/register"]) {
+  test(`POST ${url} stores client and answers 201`, async () => {
+    const { app, store } = mk();
+    const res = await request(app).post(url).send({
+      client_name: "Test", redirect_uris: ["https://claude.ai/api/mcp/auth_callback"], evil: "x",
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.client_name, "Test");
+    assert.deepEqual(res.body.redirect_uris, ["https://claude.ai/api/mcp/auth_callback"]);
+    assert.equal(res.body.token_endpoint_auth_method, "none");
+    assert.deepEqual(res.body.grant_types, ["authorization_code", "refresh_token"]);
+    assert.deepEqual(res.body.response_types, ["code"]);
+    assert.equal(typeof res.body.client_id_issued_at, "number");
+    assert.equal(res.body.evil, undefined);
+    const c = store.read().clients[res.body.client_id];
+    assert.equal(c.clientName, "Test");
+    assert.deepEqual(c.redirectUris, ["https://claude.ai/api/mcp/auth_callback"]);
+  });
+
+  test(`POST ${url} rejects disallowed redirect`, async () => {
+    const { app, store } = mk();
+    const res = await request(app).post(url).send({ redirect_uris: ["https://evil.example/cb"] });
+    assert.equal(res.status, 400);
+    assert.deepEqual(res.body, { error: "invalid_redirect_uri" });
+    assert.deepEqual(store.read().clients, {});
+  });
+}
+
+test("malformed metadata gives invalid_client_metadata", async () => {
+  const { app } = mk();
+  for (const body of [{}, { redirect_uris: "x" }, { redirect_uris: [] }, { redirect_uris: ["http://localhost:1/a"], client_name: 5 }]) {
+    const res = await request(app).post("/register").send(body);
+    assert.equal(res.status, 400, JSON.stringify(body));
+    assert.equal(res.body.error, "invalid_client_metadata", JSON.stringify(body));
+  }
+  const res = await request(app).post("/register").send({ redirect_uris: [1] });
+  assert.equal(res.status, 400);
+  assert.equal(res.body.error, "invalid_redirect_uri");
+});
+
+test("long client_name is truncated, default name applied", async () => {
+  const { app } = mk();
+  const a = await request(app).post("/register").send({ client_name: "x".repeat(500), redirect_uris: ["http://localhost:1/a"] });
+  assert.equal(a.body.client_name.length, 200);
+  const b = await request(app).post("/register").send({ redirect_uris: ["http://localhost:1/a"] });
+  assert.equal(b.body.client_name, "unbenannter Client");
+});
+
+test("mutate failure gives 500 without client_id", async () => {
+  const { store } = mk();
+  const failing = { ...store, mutate: async () => { throw new Error("disk full"); } };
+  const { app } = mk(failing);
+  const res = await request(app).post("/register").send({ redirect_uris: ["http://localhost:1/a"] });
+  assert.equal(res.status, 500);
+  assert.equal(res.body.client_id, undefined);
+  assert.equal(res.body.error, "server_error");
+});

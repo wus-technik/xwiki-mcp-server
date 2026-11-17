@@ -34,6 +34,8 @@ export function createApp(overrides = {}) {
     oauthClientSecret: cfg.oauthClientSecret,
     oauthRedirectUri: cfg.oauthRedirectUri,
     sessionSecret: cfg.sessionSecret,
+    store: cfg.store,
+    extraRedirectUris: cfg.extraRedirectUris || [],
   };
   const h = createOAuthHandlers(oauthCfg);
   app.get("/.well-known/oauth-protected-resource", h.resourceMetadata);
