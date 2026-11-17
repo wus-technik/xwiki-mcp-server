@@ -213,6 +213,7 @@ test('dir fsync failure logs a warning', async () => {
   const origWarn = console.warn; const msgs = []; console.warn = (m) => msgs.push(String(m));
   try {
     const s = openStore({ file: stubFile, key, fs: stub, platform: 'linux' });
+    msgs.length = 0;
     await s.mutate((d) => { d.sessions.a = { marker: 'SECRET-MARKER-123' }; });
     assert.ok(msgs.length >= 1);
     const file = JSON.parse(fs.readFileSync(stubFile, 'utf8'));
