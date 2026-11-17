@@ -53,6 +53,13 @@ test("bad redirect_uris give invalid_redirect_uri", async () => {
   }
 });
 
+test("invalid redirect wins over bad client_name", async () => {
+  const { app } = mk();
+  const res = await request(app).post("/register").send({ redirect_uris: ["https://evil.example/cb"], client_name: 5 });
+  assert.equal(res.status, 400);
+  assert.deepEqual(res.body, { error: "invalid_redirect_uri" });
+});
+
 test("bad client_name type gives invalid_client_metadata", async () => {
   const { app } = mk();
   const res = await request(app).post("/register").send({ redirect_uris: ["http://localhost:1/a"], client_name: 5 });
@@ -79,13 +86,15 @@ test("malformed JSON elsewhere gives invalid_request", async () => {
 
 test("201 is sent only after the write resolved", async () => {
   const { store } = mk();
-  let release;
+  let release, signalEntered;
   const gate = new Promise((r) => { release = r; });
-  const slow = { ...store, mutate: async (fn) => { await gate; return store.mutate(fn); } };
+  const entered = new Promise((r) => { signalEntered = r; });
+  const slow = { ...store, mutate: async (fn) => { signalEntered(); await gate; return store.mutate(fn); } };
   const { app } = mk(slow);
   let done = false;
   const p = request(app).post("/register").send({ redirect_uris: ["http://localhost:1/a"] }).then((r) => { done = true; return r; });
-  await new Promise((r) => setTimeout(r, 150));
+  await entered;
+  await new Promise((r) => setImmediate(r));
   assert.equal(done, false);
   release();
   const res = await p;

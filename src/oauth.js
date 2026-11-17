@@ -65,11 +65,11 @@ export function createOAuthHandlers(cfg) {
     if (!Array.isArray(uris) || uris.length === 0 || uris.length > 20) {
       return res.status(400).json({ error: "invalid_redirect_uri" });
     }
-    if (body.client_name !== undefined && typeof body.client_name !== "string") {
-      return res.status(400).json({ error: "invalid_client_metadata" });
-    }
     if (!uris.every((u) => typeof u === "string" && isAllowedRedirect(u, extraRedirectUris))) {
       return res.status(400).json({ error: "invalid_redirect_uri" });
+    }
+    if (body.client_name !== undefined && typeof body.client_name !== "string") {
+      return res.status(400).json({ error: "invalid_client_metadata" });
     }
     if (!store) {
       console.error("[register] no store configured");
