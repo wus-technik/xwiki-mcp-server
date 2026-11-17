@@ -428,3 +428,59 @@ test("createToken: whoami(neuer Token) null -> Loeschen per Original-Cookie", as
   await assert.rejects(api.createToken({ cookie: COOKIE }, req), (e) => e.code === "identity_mismatch");
   assert.ok(cookieDelete);
 });
+
+// --- Review fixes (Codex review of 1a71c25) ---
+
+test("Jeder XWiki-Aufruf hat ein Zeitlimit; Ablauf -> unavailable mit festem Text", async () => {
+  const seen = [];
+  const hang = async (url, init = {}) => {
+    seen.push(init.signal);
+    return new Promise((_resolve, reject) => {
+      if (!init.signal) return setTimeout(() => reject(new Error("no signal")), 200); // keeps RED finite
+      init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+    });
+  };
+  const api = createXWikiTokens({ baseUrl: BASE, fetcher: hang, timeoutMs: 20 });
+  const started = Date.now();
+  await assert.rejects(api.whoami({ bearer: "t" }), (e) => e instanceof XWikiTokenError && e.code === "unavailable"
+    && e.message === "XWiki token operation failed: unavailable");
+  await assert.rejects(api.createToken({ cookie: COOKIE }, { xwikiUser: USER, appName: "a", days: 90 }), (e) => e.code === "unavailable");
+  await assert.rejects(api.deleteToken({ cookie: COOKIE }, { xwikiUser: USER, consentId: CID(3) }), (e) => e.code === "unavailable");
+  await assert.rejects(api.findTokensByPrefix({ cookie: COOKIE }, USER, "x"), (e) => e.code === "unavailable");
+  assert.ok(Date.now() - started < 5000);
+  assert.equal(seen.length, 4);
+  assert.ok(seen.every((s) => s instanceof AbortSignal), "every request carries a signal");
+});
+
+test("Zeitlimit gilt auch fuer das Lesen des Antwortkoerpers", async () => {
+  const fetcher = async (url, init = {}) => ({
+    status: 200,
+    headers: new Headers(),
+    text: () => new Promise((_r, reject) => {
+      if (!init.signal) return setTimeout(() => reject(new Error("no signal")), 200);
+      init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+    }),
+  });
+  const api = createXWikiTokens({ baseUrl: BASE, fetcher, timeoutMs: 20 });
+  await assert.rejects(api.findTokensByPrefix({ cookie: COOKIE }, USER, "x"), (e) => e.code === "unavailable");
+});
+
+test("Standard-Zeitlimit ist 60 s", async () => {
+  let signal;
+  const { api } = mk((url, init) => { signal = init.signal; return rest(USER); });
+  await api.whoami({ bearer: "t" });
+  assert.ok(signal instanceof AbortSignal);
+  assert.equal(signal.aborted, false);
+});
+
+test("deleteToken: whoami mit eigenem Bearer bekommt 401 -> gone; fremder Bearer bleibt Fehler", async () => {
+  const own = mk(() => new Response("no", { status: 401 }));
+  assert.equal(await own.api.deleteToken({ bearer: OWN3 }, { xwikiUser: USER, consentId: CID(3) }), "gone");
+  assert.equal(own.calls.length, 1);
+  const foreign = mk(() => new Response("no", { status: 401 }));
+  await assert.rejects(foreign.api.deleteToken({ bearer: `${USER}/4/zzz` }, { xwikiUser: USER, consentId: CID(3) }), (e) => e.code !== undefined);
+  for (const status of [403, 500]) {
+    const other = mk(() => new Response("no", { status }));
+    await assert.rejects(other.api.deleteToken({ bearer: OWN3 }, { xwikiUser: USER, consentId: CID(3) }), (e) => e.code !== undefined, String(status));
+  }
+});

@@ -190,6 +190,7 @@ function triggerCleanups(deps) {
 
 const cleanupAad = (id) => `cleanup:${id}:xwikiToken`;
 const CLEANUP_WARN_AGE_MS = 7 * DAY_MS;
+const CLEANUP_WARN_EVERY_MS = DAY_MS;
 // A pending-create entry this young may belong to a token creation still in flight (login
 // or renewal); tokens of that name are then left alone in this run.
 const IN_FLIGHT_MS = 10 * 60 * 1000;
@@ -232,15 +233,28 @@ async function cleanupPass(deps, tried) {
   for (const entry of entries) {
     if (tried.has(entry.id)) continue;
     tried.add(entry.id);
-    if (now - (entry.createdAt || 0) > CLEANUP_WARN_AGE_MS) {
-      console.warn(`[cleanup] entry older than 7 days: id=${entry.id} xwikiUser=${entry.xwikiUser} reason=${entry.reason}`);
-    }
+    await warnIfStale(deps, entry, now);
     try {
       if (entry.reason === "pending-create") await cleanupPending(deps, entry);
       else await cleanupToken(deps, entry);
     } catch (e) {
       await recordFailure(deps, entry.id, errCode(e));
     }
+  }
+}
+
+// Entries older than 7 days are reported at most once per 24 h each; lastWarnedAt is
+// persisted so restarts and hourly runs do not repeat the warning.
+async function warnIfStale(deps, entry, now) {
+  if (now - (entry.createdAt || 0) <= CLEANUP_WARN_AGE_MS) return;
+  if (typeof entry.lastWarnedAt === "number" && now - entry.lastWarnedAt < CLEANUP_WARN_EVERY_MS) return;
+  console.warn(`[cleanup] entry older than 7 days: id=${entry.id} xwikiUser=${entry.xwikiUser} reason=${entry.reason}`);
+  try {
+    await deps.store.mutate((state) => {
+      if (state.cleanups[entry.id]) state.cleanups[entry.id].lastWarnedAt = now;
+    });
+  } catch (e) {
+    console.warn(`[cleanup] store write failed: ${errCode(e)}`);
   }
 }
 

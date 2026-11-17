@@ -590,3 +590,67 @@ test("server.js mit kaputter Speicherdatei -> Exit-Code 1, Ausgabe nennt STORE_F
   assert.equal(r.status, 1, `stdout=${r.stdout} stderr=${r.stderr}`);
   assert.match(`${r.stdout}${r.stderr}`, /STORE_FILE/);
 });
+
+// --- Review fixes (Codex review of 1a71c25) ---
+
+test("Warnung fuer Eintraege aelter als 7 Tage hoechstens einmal je 24 h und Eintrag", async () => {
+  const ctx = makeDeps({ deleteToken: async () => { throw new XWikiTokenError("unavailable"); } });
+  const { sid } = await newSession(ctx);
+  const id = await endSession(ctx.deps, sid, "idle", { awaitCleanup: true });
+  const warnings = async () => {
+    const out = captureConsole();
+    try {
+      await runCleanups(ctx.deps);
+    } finally {
+      out.restore();
+    }
+    return out.lines.filter((l) => l.includes(id)).length;
+  };
+  ctx.clock.now += 8 * DAY;
+  assert.equal(await warnings(), 1);
+  ctx.clock.now += 1 * 3600 * 1000;
+  assert.equal(await warnings(), 0, "hourly run within 24 h stays quiet");
+  ctx.clock.now += 23 * 3600 * 1000;
+  assert.equal(await warnings(), 1, "again after 24 h");
+  assert.equal(ctx.store.read().cleanups[id].attempts, 4);
+});
+
+test("Warnung wird auch fuer uebersprungene pending-create-Eintraege gedrosselt", async () => {
+  const ctx = makeDeps();
+  await seedPending(ctx);
+  ctx.clock.now = T0;
+  const count = async () => {
+    const out = captureConsole();
+    try {
+      await runCleanups(ctx.deps);
+    } finally {
+      out.restore();
+    }
+    return out.lines.filter((l) => l.includes("p-old")).length;
+  };
+  assert.equal(await count(), 1);
+  assert.equal(await count(), 0);
+  assert.equal(ctx.store.read().cleanups["p-old"].attempts, 0, "still no attempts without a live session");
+});
+
+test("/revoke: Speichern scheitert -> 503 temporarily_unavailable mit no-store, Sitzung bleibt", async () => {
+  const ctx = makeDeps({ deleteToken: async () => { throw new XWikiTokenError("unavailable"); } });
+  const { sid, tokens } = await newSession(ctx);
+  const failing = { ...ctx.store, mutate: async () => { throw new Error("disk full"); } };
+  const app = createApp({
+    sessionSecret: SECRET, mcpBaseUrl: BASE, store: failing, authentik: ctx.deps.authentik,
+    xwikiTokens: ctx.deps.xwikiTokens, now: ctx.deps.now, extraRedirectUris: [], authDebug: false,
+  });
+  const out = captureConsole();
+  let res;
+  try {
+    res = await request(app).post("/revoke").type("form").send({ token: tokens.refresh_token });
+  } finally {
+    out.restore();
+  }
+  assert.equal(res.status, 503);
+  assert.deepEqual(res.body, { error: "temporarily_unavailable" });
+  assert.equal(res.headers["cache-control"], "no-store");
+  assert.ok(ctx.store.read().sessions[sid], "not revoked");
+  assert.ok(!out.lines.join("\n").includes(tokens.refresh_token));
+});

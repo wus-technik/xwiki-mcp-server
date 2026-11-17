@@ -138,14 +138,19 @@ function profilePageName(xwikiUser) {
   return page;
 }
 
-export function createXWikiTokens({ baseUrl, fetcher = fetch }) {
+export const XWIKI_TIMEOUT_MS = 60 * 1000;
+
+export function createXWikiTokens({ baseUrl, fetcher = fetch, timeoutMs = XWIKI_TIMEOUT_MS }) {
   const base = baseUrl.replace(/\/+$/, "");
 
-  // Network errors and unreadable bodies become a fixed "unavailable" error
+  // Network errors, timeouts and unreadable bodies become a fixed "unavailable" error
   // (never "gone"), so callers retry instead of treating the token as deleted.
+  // Every request (body included) is bounded by timeoutMs: a token creation must not
+  // outlive the pending-create in-progress window (sessions.js IN_FLIGHT_MS, 10 min).
   async function send(url, init) {
     try {
-      const res = await fetcher(url, init);
+      const signal = AbortSignal.timeout(timeoutMs);
+      const res = await fetcher(url, { ...init, signal });
       const text = init.wantText ? await res.text() : null;
       return { res, text };
     } catch {
@@ -207,9 +212,19 @@ export function createXWikiTokens({ baseUrl, fetcher = fetch }) {
 
   async function deleteToken(auth, { xwikiUser, consentId }) {
     const own = !!auth.bearer && bearerOwns(auth, consentId);
-    if (auth.bearer && (await whoami(auth)) === null) {
-      if (own) return "gone";
-      throw new XWikiTokenError("login_required");
+    if (auth.bearer) {
+      let user;
+      try {
+        user = await whoami(auth);
+      } catch (err) {
+        // Some XWiki versions answer a revoked bearer with 401 instead of the guest user.
+        if (own && err instanceof XWikiTokenError && err.status === 401) return "gone";
+        throw err;
+      }
+      if (user === null) {
+        if (own) return "gone";
+        throw new XWikiTokenError("login_required");
+      }
     }
     try {
       const page = await loadPage(auth, xwikiUser);
