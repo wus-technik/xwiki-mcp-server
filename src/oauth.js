@@ -18,6 +18,7 @@ const STATE_TTL = 10 * 60 * 1000;
 const PENDING_TTL = 10 * 60 * 1000;
 const CODE_TTL = 5 * 60 * 1000;
 const MAX_FLOWS = 10000; // /authorize is anonymous: cap the in-memory state
+const SWEEP_INTERVAL = 60 * 1000;
 const TOKEN_DAYS = 90;
 const CHALLENGE_RE = /^[A-Za-z0-9_-]{43,128}$/;
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
@@ -53,6 +54,8 @@ function ttlMap(now, ttl, max = Infinity) {
       return v;
     },
     delete: (key) => m.delete(key),
+    sweep,
+    size: () => m.size,
   };
 }
 
@@ -139,6 +142,14 @@ export function createOAuthHandlers(cfg, deps = {}) {
   const flows = ttlMap(now, STATE_TTL, MAX_FLOWS); // serverState → flow
   const pendings = ttlMap(now, PENDING_TTL); // pendingId → { flow, sub, username, authentikRefresh }
   const codes = ttlMap(now, CODE_TTL); // code → { sid, familyId, clientId, redirectUri, codeChallenge, resource }
+  // Expired entries are dropped even if never accessed again (pendings hold the Authentik
+  // refresh token in memory until then).
+  const sweep = () => {
+    flows.sweep();
+    pendings.sweep();
+    codes.sweep();
+  };
+  setInterval(sweep, SWEEP_INTERVAL).unref();
 
   // AUTH_DEBUG: event name, short sid, user and client name only (no request data).
   const log = (event, extra = {}) => logger.info(event, undefined, extra);
@@ -207,6 +218,8 @@ export function createOAuthHandlers(cfg, deps = {}) {
     }
     const clientState = str(q.state);
     if (!clientState || clientState.length > 2048) return sendError(res, 400, "Die Anfrage enthält keinen gültigen state-Wert.", "invalid_request");
+    // A trailing slash is tolerated: clients differ in whether they append one to the
+    // resource URL; it names the same resource.
     let resource;
     if (q.resource !== undefined) {
       resource = str(q.resource);
@@ -311,6 +324,10 @@ export function createOAuthHandlers(cfg, deps = {}) {
     res.status(200).type("html").send(htmlPage("Zugriff auf XWiki erlauben?", body));
   }
 
+  function sendBusy(res) {
+    return sendError(res, 409, "Diese Anmeldung wird gerade in einem anderen Fenster abgeschlossen.", "invalid_request");
+  }
+
   // Shared by both ways in (grant present / consent given). Serialized per XWiki user so the
   // pending-create recovery never mistakes an in-flight token of the same name for a leftover.
   async function finish(res, pending, xwikiUser, cookie, client) {
@@ -383,21 +400,30 @@ export function createOAuthHandlers(cfg, deps = {}) {
     if (!flowCookieMatches(req, pending.flow)) {
       return sendError(res, 400, "Die Anmeldung wurde in einem anderen Browser begonnen. Bitte im Programm erneut verbinden.", "invalid_request");
     }
-    const cookie = xwikiCookieOf(req);
-    const xwikiUser = await verifyIdentity(res, t, pending, cookie);
-    if (!xwikiUser) return;
-    const state = store.read();
-    const client = own(state.clients, pending.flow.clientId);
-    if (!client) {
-      pendings.delete(t);
-      return sendError(res, 400, "Das Programm ist nicht mehr registriert.", "invalid_client");
+    // Claim before the first await: a parallel /complete or /consent for the same login
+    // must not reach finish() a second time.
+    if (pending.busy) return sendBusy(res);
+    pending.busy = true;
+    try {
+      const cookie = xwikiCookieOf(req);
+      const xwikiUser = await verifyIdentity(res, t, pending, cookie);
+      if (!xwikiUser) return;
+      const state = store.read();
+      const client = own(state.clients, pending.flow.clientId);
+      if (!client) {
+        pendings.delete(t);
+        return sendError(res, 400, "Das Programm ist nicht mehr registriert.", "invalid_client");
+      }
+      if (own(state.grants, `${pending.sub}|${pending.flow.clientId}`)) {
+        pendings.delete(t);
+        return await finish(res, pending, xwikiUser, cookie, client);
+      }
+      log("consent_shown", { user: xwikiUser, client: client.clientName });
+      return consentPage(res, t, pending, xwikiUser, client);
+    } finally {
+      // Only matters on the consent-page path; every other path has removed the entry.
+      pending.busy = false;
     }
-    if (own(state.grants, `${pending.sub}|${pending.flow.clientId}`)) {
-      pendings.delete(t);
-      return finish(res, pending, xwikiUser, cookie, client);
-    }
-    log("consent_shown", { user: xwikiUser, client: client.clientName });
-    return consentPage(res, t, pending, xwikiUser, client);
   };
 
   const consent = async (req, res) => {
@@ -410,6 +436,8 @@ export function createOAuthHandlers(cfg, deps = {}) {
     }
     const action = str(req.body?.action);
     if (action !== "allow" && action !== "deny") return sendError(res, 400, "Ungültige Auswahl.", "invalid_request");
+    if (pending.busy) return sendBusy(res);
+    // Taken synchronously, before any await: this login can be finished only once.
     pendings.delete(t);
     if (action === "deny") {
       log("consent_denied", {});
@@ -470,6 +498,8 @@ export function createOAuthHandlers(cfg, deps = {}) {
     consent: wrap(consent),
     token: wrap(token),
     consumeCode,
+    sweep,
+    stats: () => ({ flows: flows.size(), pendings: pendings.size(), codes: codes.size() }),
   };
 }
 

@@ -12,6 +12,14 @@ import { createUploadRouter } from "./upload-route.js";
 import { handleMcpRequest } from "./mcp-handler.js";
 import { deleteSession } from "./session-store.js";
 
+const FLOW_PAGE_PATHS = new Set([
+  "/authorize",
+  "/mcp/oauth/authorize",
+  "/mcp/oauth/callback",
+  "/mcp/oauth/complete",
+  "/mcp/oauth/consent",
+]);
+
 export function createApp(overrides = {}) {
   const cfg = { ...loadConfig(), ...overrides };
 
@@ -107,6 +115,10 @@ export function createApp(overrides = {}) {
   // Body-parser failures (malformed JSON etc.) answer JSON, not Express's HTML page.
   app.use((err, req, res, next) => {
     if (res.headersSent || !err || typeof err.status !== "number" || err.status < 400 || err.status >= 500 || !err.type) return next(err);
+    // Browser pages of the login flow get the flow's HTML error page.
+    if (FLOW_PAGE_PATHS.has(req.path)) {
+      return sendError(res, err.status, "Die Anfrage konnte nicht gelesen werden. Bitte im Programm erneut verbinden.", "invalid_request");
+    }
     const isRegister = req.path === "/register" || req.path === "/mcp/oauth/register";
     res.status(err.status).json({ error: isRegister ? "invalid_client_metadata" : "invalid_request" });
   });

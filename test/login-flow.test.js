@@ -50,9 +50,11 @@ async function setup(opts = {}) {
     },
     refresh: async () => { throw new Error("not used"); },
   };
+  let whoamiImpl = null;
   const xwikiTokens = {
     whoami: async (auth) => {
       calls.whoami.push(auth);
+      if (whoamiImpl) return whoamiImpl(auth);
       return "whoami" in opts ? opts.whoami : USER;
     },
     createToken: async (auth, args) => {
@@ -81,7 +83,7 @@ async function setup(opts = {}) {
     extraRedirectUris: [],
     authDebug: !!opts.authDebug,
   });
-  return { app, store, file, calls, clock };
+  return { app, store, file, calls, clock, setWhoami: (fn) => { whoamiImpl = fn; } };
 }
 
 function authorizeQuery(over = {}) {
@@ -507,4 +509,140 @@ test("createSession schreibt Sitzung und Familie in einem mutate und entfernt pe
   assert.equal(st.families[familyId].sid, sid);
   assert.equal(st.cleanups.p1, undefined);
   assert.throws(() => store.openField(st.sessions[sid].xwikiTokenSealed, `session:other:xwikiToken`));
+});
+
+// --- Review fixes (Codex review of 1532dca) ---
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => { resolve = r; });
+  return { promise, resolve };
+}
+const tick = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function toCallbackDone(ctx) {
+  const a = await request(ctx.app).get("/authorize").query(authorizeQuery());
+  const flow = flowCookie(a);
+  const state = new URL(a.headers.location).searchParams.get("state");
+  const cb = await request(ctx.app).get("/mcp/oauth/callback").query({ code: "c", state }).set("Cookie", flow);
+  return { path: new URL(cb.headers.location).searchParams.get("xredirect"), cookie: `${flow}; JSESSIONID=x` };
+}
+
+test("Parallele /complete-Aufrufe mit Grant: nur einer schliesst ab", async () => {
+  const ctx = await setup({ seed: (s) => { s.grants[`sub-1|${CID}`] = { at: 1 }; } });
+  const c = await toCallbackDone(ctx);
+  const gate = deferred();
+  ctx.setWhoami(async () => { await gate.promise; return USER; });
+  const p1 = request(ctx.app).get(c.path).set("Cookie", c.cookie).then((r) => r);
+  const p2 = request(ctx.app).get(c.path).set("Cookie", c.cookie).then((r) => r);
+  await tick(50);
+  gate.resolve();
+  const [r1, r2] = await Promise.all([p1, p2]);
+  const statuses = [r1.status, r2.status].sort();
+  assert.equal(statuses[0], 302);
+  assert.ok(statuses[1] >= 400, String(statuses[1]));
+  assert.equal(ctx.calls.createToken.length, 1);
+  assert.equal(Object.keys(ctx.store.read().sessions).length, 1);
+});
+
+test("/complete in Arbeit, dann /consent: nur einer schliesst ab", async () => {
+  const ctx = await setup();
+  const c = await toComplete(ctx); // consent page shown, no grant yet
+  assert.equal(c.res.status, 200);
+  const f = consentFields(c.res.text);
+  const gate = deferred();
+  ctx.setWhoami(async () => { await gate.promise; return USER; });
+  const pComplete = request(ctx.app).get(`/mcp/oauth/complete?t=${c.t}`).set("Cookie", c.cookie).then((r) => r);
+  await tick(30);
+  const pConsent = request(ctx.app).post("/mcp/oauth/consent").type("form").set("Cookie", c.cookie)
+    .send({ t: f.t, csrf: f.csrf, action: "allow" }).then((r) => r);
+  await tick(30);
+  gate.resolve();
+  const [rc, rp] = await Promise.all([pComplete, pConsent]);
+  assert.equal(rc.status, 200, "complete shows the consent page again");
+  assert.ok(rp.status >= 400, String(rp.status));
+  assert.equal(ctx.calls.createToken.length, 0);
+  assert.deepEqual(ctx.store.read().sessions, {});
+});
+
+test("/consent in Arbeit, dann /complete: nur einer schliesst ab", async () => {
+  const ctx = await setup();
+  const c = await toComplete(ctx);
+  const f = consentFields(c.res.text);
+  const gate = deferred();
+  ctx.setWhoami(async () => { await gate.promise; return USER; });
+  const q1 = request(ctx.app).post("/mcp/oauth/consent").type("form").set("Cookie", c.cookie)
+    .send({ t: f.t, csrf: f.csrf, action: "allow" }).then((r) => r);
+  await tick(30);
+  const q2 = request(ctx.app).get(`/mcp/oauth/complete?t=${c.t}`).set("Cookie", c.cookie).then((r) => r);
+  await tick(30);
+  gate.resolve();
+  const [a, b] = await Promise.all([q1, q2]);
+  assert.equal(a.status, 302);
+  assert.ok(b.status >= 400, String(b.status));
+  assert.equal(ctx.calls.createToken.length, 1);
+  assert.equal(Object.keys(ctx.store.read().sessions).length, 1);
+});
+
+test("Zwei /complete im Zustimmungsweg: zweiter abgewiesen, Zustimmung danach genau einmal", async () => {
+  const ctx = await setup();
+  const c = await toComplete(ctx);
+  const f = consentFields(c.res.text);
+  const gate = deferred();
+  ctx.setWhoami(async () => { await gate.promise; return USER; });
+  const p1 = request(ctx.app).get(`/mcp/oauth/complete?t=${c.t}`).set("Cookie", c.cookie).then((r) => r);
+  await tick(30);
+  const p2 = request(ctx.app).get(`/mcp/oauth/complete?t=${c.t}`).set("Cookie", c.cookie).then((r) => r);
+  await tick(30);
+  gate.resolve();
+  const [r1, r2] = await Promise.all([p1, p2]);
+  assert.equal(r1.status, 200);
+  assert.ok(r2.status >= 400, String(r2.status));
+  ctx.setWhoami(null);
+  const ok = await request(ctx.app).post("/mcp/oauth/consent").type("form").set("Cookie", c.cookie)
+    .send({ t: f.t, csrf: f.csrf, action: "allow" });
+  assert.equal(ok.status, 302);
+  assert.equal(ctx.calls.createToken.length, 1);
+});
+
+test("resource mit abschliessendem Slash wird akzeptiert, anderer Pfad nicht", async () => {
+  const ctx = await setup();
+  const ok = await request(ctx.app).get("/authorize").query(authorizeQuery({ resource: `${BASE}/` }));
+  assert.equal(ok.status, 302);
+  const bad = await request(ctx.app).get("/authorize").query(authorizeQuery({ resource: `${BASE}/x` }));
+  assert.equal(bad.status, 400);
+  assert.match(bad.text, /invalid_target/);
+});
+
+test("Body-Parser-Fehler auf Flow-Pfaden -> deutsche Fehlerseite, JSON sonst", async () => {
+  const ctx = await setup();
+  const big = await request(ctx.app).post("/mcp/oauth/consent").type("form").send(`t=${"a".repeat(200 * 1024)}`);
+  assert.equal(big.status, 413);
+  assert.match(big.headers["content-type"], /html/);
+  assertFlowHeaders(big);
+  assert.match(big.text, /Anmeldung nicht möglich/);
+  const bad = await request(ctx.app).post("/mcp/oauth/consent").set("Content-Type", "application/json").send("{");
+  assert.equal(bad.status, 400);
+  assert.match(bad.headers["content-type"], /html/);
+  assertFlowHeaders(bad);
+  const tok = await request(ctx.app).post("/mcp/oauth/token").set("Content-Type", "application/json").send("{");
+  assert.equal(tok.status, 400);
+  assert.deepEqual(tok.body, { error: "invalid_request" });
+  const reg = await request(ctx.app).post("/mcp/oauth/register").set("Content-Type", "application/json").send("{");
+  assert.deepEqual(reg.body, { error: "invalid_client_metadata" });
+});
+
+test("sweep entfernt abgelaufene Eintraege ohne Zugriff", async () => {
+  const ctx = await setup();
+  const c = await toComplete(ctx);
+  assert.equal(c.res.status, 200);
+  await request(ctx.app).get("/authorize").query(authorizeQuery());
+  const before = ctx.app.locals.oauth.stats();
+  assert.equal(before.pendings, 1);
+  assert.equal(before.flows, 1);
+  ctx.app.locals.oauth.sweep();
+  assert.deepEqual(ctx.app.locals.oauth.stats(), before, "nothing expired yet");
+  ctx.clock.now += 10 * 60 * 1000 + 1;
+  ctx.app.locals.oauth.sweep();
+  assert.deepEqual(ctx.app.locals.oauth.stats(), { flows: 0, pendings: 0, codes: 0 });
 });
