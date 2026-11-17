@@ -49,3 +49,16 @@ test("TLS-Bypass in Produktion wird abgelehnt", () => {
   const cfg = loadConfig({ ...base, NODE_ENV: "production", NODE_TLS_REJECT_UNAUTHORIZED: "0" });
   assert.throws(() => validateConfig(cfg), /NODE_TLS_REJECT_UNAUTHORIZED/);
 });
+const k = Buffer.alloc(32, 1).toString("base64");
+test("TOKEN_ENC_KEY mit angehaengtem Muell wird abgelehnt", () => {
+  assert.throws(() => validateConfig(loadConfig({ ...base, TOKEN_ENC_KEY: k + "!!" })), /TOKEN_ENC_KEY/);
+});
+test("TOKEN_ENC_KEY mit ungueltigem Zeichen wird abgelehnt", () => {
+  assert.throws(() => validateConfig(loadConfig({ ...base, TOKEN_ENC_KEY: k.slice(0, 10) + "!" + k.slice(11) })), /TOKEN_ENC_KEY/);
+});
+test("SESSION_SECRET aus Leerzeichen wird abgelehnt", () => {
+  assert.throws(() => validateConfig(loadConfig({ ...base, SESSION_SECRET: " ".repeat(32) })), /SESSION_SECRET/);
+});
+test("STORE_FILE aus Leerzeichen gilt als fehlend", () => {
+  assert.throws(() => validateConfig(loadConfig({ ...base, STORE_FILE: "   " })), /STORE_FILE/);
+});
