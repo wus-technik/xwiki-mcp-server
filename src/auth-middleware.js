@@ -2,7 +2,7 @@ import { jwtVerify } from "jose";
 import { getSession } from "./session-store.js";
 
 export function createAuthMiddleware({ sessionSecret, mcpBaseUrl = "", authDebugLogger }) {
-  const jwtSecret = new TextEncoder().encode(sessionSecret || "dev-insecure-secret-change-me");
+  const jwtSecret = new TextEncoder().encode(sessionSecret);
 
   return async (req, res, next) => {
     const auth = req.headers.authorization || "";

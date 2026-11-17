@@ -23,7 +23,7 @@ services:
       - MCP_BASE_URL=${MCP_BASE_URL}
       - SESSION_SECRET=${SESSION_SECRET}
       # Keeps MCP logins across container recreates; the file holds XWiki session cookies
-      - SESSION_FILE=/data/sessions.json
+      - STORE_FILE=/data/sessions.json
       - NODE_ENV=${NODE_ENV:-production}
       # Dev only — do NOT set to 0 in production
       # - NODE_TLS_REJECT_UNAUTHORIZED=0

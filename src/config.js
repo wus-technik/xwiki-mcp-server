@@ -1,28 +1,48 @@
-export const PORT = process.env.PORT || "3000";
-export const XWIKI_URL = (process.env.XWIKI_URL || "").replace(/\/$/, "");
-// Public base URL for page links returned to MCP clients; XWIKI_URL is usually an internal
-// Docker hostname that clients cannot open. Falls back to XWIKI_URL.
-export const XWIKI_PUBLIC_URL = (process.env.XWIKI_PUBLIC_URL || XWIKI_URL).replace(/\/$/, "");
-export const XWIKI_WIKI = process.env.XWIKI_WIKI || "xwiki";
+const list = (v) => (v || "").split(",").map((s) => s.trim()).filter(Boolean);
+const stripSlash = (v) => (v || "").replace(/\/$/, "");
 
-export const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || "";
-export const OAUTH_CLIENT_SECRET = process.env.OAUTH_CLIENT_SECRET || "";
-export const OAUTH_REDIRECT_URI = process.env.OAUTH_REDIRECT_URI || "";
-export const AUTHENTIK_ISSUER = (process.env.AUTHENTIK_ISSUER || "").replace(/\/$/, "");
-export const MCP_BASE_URL = (process.env.MCP_BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
-export const SESSION_SECRET = process.env.SESSION_SECRET || "";
-// Where MCP sessions are persisted across restarts; unset keeps them in memory only.
-export const SESSION_FILE = process.env.SESSION_FILE || "";
-export const AUTH_DEBUG = process.env.AUTH_DEBUG === "1";
-
-if (!SESSION_SECRET) {
-  console.warn("[config] SESSION_SECRET not set — using insecure default. Required in production.");
+export function loadConfig(env = process.env) {
+  const port = env.PORT || "3000";
+  const xwikiUrl = stripSlash(env.XWIKI_URL);
+  return {
+    port,
+    nodeEnv: env.NODE_ENV || "development",
+    devTlsBypass: env.NODE_TLS_REJECT_UNAUTHORIZED === "0",
+    xwikiUrl,
+    // Public base URL for page links returned to MCP clients; xwikiUrl is usually an internal
+    // Docker hostname that clients cannot open. Falls back to xwikiUrl.
+    xwikiPublicUrl: stripSlash(env.XWIKI_PUBLIC_URL || xwikiUrl),
+    xwikiWiki: env.XWIKI_WIKI || "xwiki",
+    oauthClientId: env.OAUTH_CLIENT_ID || "",
+    oauthClientSecret: env.OAUTH_CLIENT_SECRET || "",
+    oauthRedirectUri: env.OAUTH_REDIRECT_URI || "",
+    authentikIssuer: stripSlash(env.AUTHENTIK_ISSUER),
+    mcpBaseUrl: stripSlash(env.MCP_BASE_URL || `http://localhost:${port}`),
+    sessionSecret: env.SESSION_SECRET || "",
+    tokenEncKey: Buffer.from(env.TOKEN_ENC_KEY || "", "base64"),
+    // Where the persistent store lives (sessions, tokens); required.
+    storeFile: env.STORE_FILE || "",
+    allowedGroups: env.ALLOWED_GROUPS ? list(env.ALLOWED_GROUPS) : ["AdminsIT", "xwiki_redaktion"],
+    extraRedirectUris: list(env.EXTRA_REDIRECT_URIS),
+    extraOrigins: list(env.EXTRA_ORIGINS),
+    authDebug: env.AUTH_DEBUG === "1",
+  };
 }
 
-export const NODE_ENV = process.env.NODE_ENV || "development";
-export const DEV_TLS_BYPASS = process.env.NODE_TLS_REJECT_UNAUTHORIZED === "0";
-
-if (DEV_TLS_BYPASS && NODE_ENV === "production") {
-  console.error("[config] NODE_TLS_REJECT_UNAUTHORIZED=0 in production is not allowed. Exiting.");
-  process.exit(1);
+export function validateConfig(cfg) {
+  if (!cfg.sessionSecret || Buffer.byteLength(cfg.sessionSecret) < 32) {
+    throw new Error("SESSION_SECRET must be set and at least 32 bytes long.");
+  }
+  if (!cfg.tokenEncKey || cfg.tokenEncKey.length === 0) {
+    throw new Error("TOKEN_ENC_KEY must be set (32 bytes, base64-encoded).");
+  }
+  if (cfg.tokenEncKey.length !== 32) {
+    throw new Error(`TOKEN_ENC_KEY must decode to exactly 32 bytes (got ${cfg.tokenEncKey.length}).`);
+  }
+  if (!cfg.storeFile) {
+    throw new Error("STORE_FILE must be set (path of the persistent store).");
+  }
+  if (cfg.devTlsBypass && cfg.nodeEnv === "production") {
+    throw new Error("NODE_TLS_REJECT_UNAUTHORIZED=0 in production is not allowed.");
+  }
 }

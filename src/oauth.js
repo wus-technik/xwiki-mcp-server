@@ -30,7 +30,7 @@ export function createOAuthHandlers(cfg) {
     sessionSecret,
   } = cfg;
 
-  const jwtSecret = new TextEncoder().encode(sessionSecret || "dev-insecure-secret-change-me");
+  const jwtSecret = new TextEncoder().encode(sessionSecret);
 
   const resourceMetadata = (_req, res) => {
     res.json({

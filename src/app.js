@@ -1,10 +1,6 @@
 import express from "express";
 import cookieParser from "cookie-parser";
-import {
-  XWIKI_URL, XWIKI_PUBLIC_URL, XWIKI_WIKI,
-  OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI,
-  AUTHENTIK_ISSUER, MCP_BASE_URL, SESSION_SECRET, AUTH_DEBUG,
-} from "./config.js";
+import { loadConfig } from "./config.js";
 import { createOAuthRouter, createOAuthHandlers } from "./oauth.js";
 import { createAuthMiddleware } from "./auth-middleware.js";
 import { createAuthDebugLogger } from "./auth-debug.js";
@@ -15,19 +11,7 @@ import { handleMcpRequest } from "./mcp-handler.js";
 import { deleteSession } from "./session-store.js";
 
 export function createApp(overrides = {}) {
-  const cfg = {
-    xwikiUrl: XWIKI_URL,
-    xwikiPublicUrl: XWIKI_PUBLIC_URL,
-    xwikiWiki: XWIKI_WIKI,
-    oauthClientId: OAUTH_CLIENT_ID,
-    oauthClientSecret: OAUTH_CLIENT_SECRET,
-    oauthRedirectUri: OAUTH_REDIRECT_URI,
-    authentikIssuer: AUTHENTIK_ISSUER,
-    mcpBaseUrl: MCP_BASE_URL,
-    sessionSecret: SESSION_SECRET,
-    authDebug: AUTH_DEBUG,
-    ...overrides,
-  };
+  const cfg = { ...loadConfig(), ...overrides };
 
   const xwikiClient = overrides.xwikiClient || createXWikiClient({
     baseUrl: cfg.xwikiUrl,
