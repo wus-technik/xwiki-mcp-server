@@ -172,7 +172,7 @@ export function createXWikiTokens({ baseUrl, fetcher = fetch }) {
     return `${base}/bin/view/XWiki/${encodeURIComponent(profilePageName(xwikiUser))}?category=userapplications`;
   }
 
-  async function pageRequest(auth, xwikiUser, params) {
+  async function pageRequest(auth, xwikiUser, params, { requireFormToken = true } = {}) {
     const headers = authHeaders(auth);
     const init = { method: "GET", headers, redirect: "manual", wantText: true };
     if (params) {
@@ -188,7 +188,7 @@ export function createXWikiTokens({ baseUrl, fetcher = fetch }) {
     const pane = extractPane(text);
     if (!pane) throw new XWikiTokenError("unexpected_page", s);
     const formToken = inputValue(pane, "form_token");
-    if (!formToken) throw new XWikiTokenError("unexpected_page", s);
+    if (!formToken && requireFormToken) throw new XWikiTokenError("unexpected_page", s);
     return { html: text, pane, formToken };
   }
 
@@ -197,7 +197,8 @@ export function createXWikiTokens({ baseUrl, fetcher = fetch }) {
   // Contract: "gone" means the consent is really not valid any more. A revoked
   // bearer (whoami null) or a 401 on the own bearer counts as gone only when
   // the bearer belongs to consentId (same user and index segment); otherwise we
-  // cannot tell and throw. Transient failures (5xx, network) always throw.
+  // cannot tell and throw. This assumes the bearer is exactly the token that was
+  // issued for this consent. Transient failures (5xx, network) always throw.
   function bearerOwns(auth, consentId) {
     const m = /^(.+)\/(\d+)\/[^/]+$/.exec(auth.bearer || "");
     return !!m && consentId === `${m[1]}^XWiki.OIDC.ConsentClass[${m[2]}]`;
@@ -246,38 +247,37 @@ export function createXWikiTokens({ baseUrl, fetcher = fetch }) {
 
   async function createToken(auth, { xwikiUser, appName, days }) {
     const page = await loadPage(auth, xwikiUser);
-    const res = await pageRequest(auth, xwikiUser, {
-      form_token: page.formToken,
-      application_name: appName,
-      expiration: String(days),
-      oidc_consent_create: "",
-    });
+    // The form_token check is deferred: once the token is in the response, every
+    // later failure must go through cleanup so no live token is left behind.
+    const res = await pageRequest(
+      auth,
+      xwikiUser,
+      {
+        form_token: page.formToken,
+        application_name: appName,
+        expiration: String(days),
+        oidc_consent_create: "",
+      },
+      { requireFormToken: false },
+    );
     const created = parseCreated(res.html);
-    if (!created || created.title !== appName) throw new XWikiTokenError("unexpected_page");
-    const { token } = created;
-    const parts = /^(.+)\/(\d+)\/[A-Za-z0-9_-]+$/.exec(token);
+    const parts = created && /^(.+)\/(\d+)\/[A-Za-z0-9_-]+$/.exec(created.token);
     if (!parts) throw new XWikiTokenError("unexpected_page");
+    const { token } = created;
     const [, tokenUser, index] = parts;
     const consentId = `${tokenUser}^XWiki.OIDC.ConsentClass[${index}]`;
-    if (tokenUser !== xwikiUser) {
-      await cleanup(auth, token, { xwikiUser: tokenUser, consentId });
-      throw new XWikiTokenError("identity_mismatch");
-    }
-    const entry = parseConsentList(res.html).find((e) => e.consentId === consentId);
-    if (!entry) throw new XWikiTokenError("unexpected_page");
-    const expiresAt = entry.expiresAt || Date.now() + Number(days) * DAY_MS;
-    let who;
     try {
-      who = await whoami({ bearer: token });
+      if (created.title !== appName || !res.formToken) throw new XWikiTokenError("unexpected_page");
+      if (tokenUser !== xwikiUser) throw new XWikiTokenError("identity_mismatch");
+      const entry = parseConsentList(res.html).find((e) => e.consentId === consentId);
+      if (!entry) throw new XWikiTokenError("unexpected_page");
+      const expiresAt = entry.expiresAt || Date.now() + Number(days) * DAY_MS;
+      if ((await whoami({ bearer: token })) !== xwikiUser) throw new XWikiTokenError("identity_mismatch");
+      return { token, consentId, expiresAt };
     } catch (err) {
-      await cleanup(auth, token, { xwikiUser, consentId });
+      await cleanup(auth, token, { xwikiUser: tokenUser, consentId });
       throw err;
     }
-    if (who !== xwikiUser) {
-      await cleanup(auth, token, { xwikiUser, consentId });
-      throw new XWikiTokenError("identity_mismatch");
-    }
-    return { token, consentId, expiresAt };
   }
 
   async function findTokensByPrefix(auth, xwikiUser, prefix) {

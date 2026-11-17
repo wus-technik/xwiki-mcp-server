@@ -24,10 +24,14 @@ const TOKEN = `${USER}/6/REDACTED-RANDOM`;
 const BOX = '<div class="box">\n<div class="pull-left">';
 
 function removeBox(html, idx) {
-  return html
+  let out = html
     .split(BOX)
     .filter((p) => !p.includes(`ConsentClass[${idx}]"`))
     .join(BOX);
+  // Removing the last entry also drops the closing tags of the pane; restore them.
+  const open = (out.match(/<div\b/g) || []).length;
+  const close = (out.match(/<\/div>/g) || []).length;
+  return out + "</div>".repeat(Math.max(0, open - close));
 }
 
 const html = (body, status = 200, headers = {}) =>
@@ -341,10 +345,46 @@ test("parseCreatedToken: Token ausserhalb des Erfolgskastens zaehlt nicht", () =
   assert.equal(parseCreatedToken(h), null);
 });
 
-test("POST-Antwort ohne form_token -> unexpected_page", async () => {
+// Create POST answers with `created`; later GETs show the token until a delete POST arrives.
+function createThenCleanup(created) {
+  const deletes = [];
+  const afterDelete = removeBox(CREATED, 6);
+  let gone = false;
+  const h = (url, init) => {
+    if (url === `${BASE}/rest/`) return rest(USER);
+    if (url === PAGE_URL && init.method === "POST") {
+      const p = new URLSearchParams(init.body);
+      if (p.has("oidc_consent_delete")) {
+        deletes.push({ consent: p.get("consent_id"), auth: init.headers.Authorization || init.headers.Cookie });
+        gone = true;
+        return html(afterDelete);
+      }
+      return html(created);
+    }
+    return html(gone ? afterDelete : CREATED);
+  };
+  return { h, deletes };
+}
+
+test("Fehler nach dem Anlegen leiten ueber Aufraeumen (form_token fehlt, Titel, Eintrag fehlt)", async () => {
   const noFT = CREATED.replace(/<input[^>]*form_token[^>]*>/g, "");
-  const { api } = mk(happyHandler({ created: noFT }));
+  const wrongTitle = CREATED.replace('<div class="box-title">mcp-vortest-2</div><p>', '<div class="box-title">anders</div><p>');
+  const noEntry = removeBox(CREATED, 6);
+  for (const created of [noFT, wrongTitle, noEntry]) {
+    const { h, deletes } = createThenCleanup(created);
+    const { api } = mk(h);
+    await assert.rejects(api.createToken({ cookie: COOKIE }, req), (e) => e.code === "unexpected_page");
+    assert.equal(deletes.length, 1);
+    assert.equal(deletes[0].consent, `${USER}^XWiki.OIDC.ConsentClass[6]`);
+    assert.equal(deletes[0].auth, `Bearer ${TOKEN}`);
+  }
+});
+
+test("createToken: Antwort ohne extrahierbaren Token -> unexpected_page ohne Aufraeumen", async () => {
+  const { h, deletes } = createThenCleanup(LIST);
+  const { api } = mk(h);
   await assert.rejects(api.createToken({ cookie: COOKIE }, req), (e) => e.code === "unexpected_page");
+  assert.equal(deletes.length, 0);
 });
 
 test("Namen mit Gedankenstrich: roh, numerisch und benannt; ungueltige Entity wirft nicht", async () => {
