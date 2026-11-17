@@ -48,15 +48,20 @@ export function createApp(overrides = {}) {
   // One handler set for both mounts: the login flow keeps its in-memory state there.
   // Claude Code constructs OAuth URLs as origin+/path, ignoring the /mcp base path.
   // Mount the real handlers at root so those requests reach the right logic.
+  const now = overrides.now || Date.now;
   const h = createOAuthHandlers(
     { ...cfg, extraRedirectUris: cfg.extraRedirectUris || [] },
-    { authentik, xwikiTokens, now: overrides.now || Date.now, logger: authDebugLogger },
+    { authentik, xwikiTokens, now, logger: authDebugLogger },
   );
   app.locals.oauth = h;
+  // The session deps for background jobs (server.js → startBackground).
+  app.locals.deps = { store: cfg.store, cfg, authentik, xwikiTokens, now };
   mountMetadata(app, cfg);
   app.post("/register", h.register);
   app.get("/authorize", h.authorize);
   app.post("/token", h.token);
+  app.post("/revoke", h.revoke);
+  app.post("/oauth/revoke", h.revoke);
 
   const authMiddleware = createAuthMiddleware({
     sessionSecret: cfg.sessionSecret,
@@ -119,7 +124,7 @@ export function createApp(overrides = {}) {
     if (FLOW_PAGE_PATHS.has(req.path)) {
       return sendError(res, err.status, "Die Anfrage konnte nicht gelesen werden. Bitte im Programm erneut verbinden.", "invalid_request");
     }
-    if (req.path === "/token" || req.path === "/mcp/oauth/token") {
+    if (["/token", "/mcp/oauth/token", "/revoke", "/oauth/revoke", "/mcp/oauth/revoke"].includes(req.path)) {
       res.set("Cache-Control", "no-store");
       res.set("Pragma", "no-cache");
     }

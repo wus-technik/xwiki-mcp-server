@@ -3,7 +3,7 @@ import { randomUUID, randomBytes, createHash, createHmac, timingSafeEqual } from
 import { isAllowedRedirect, redirectMatches } from "./redirects.js";
 import { AuthentikError, AuthentikRejected, AuthentikUnavailable } from "./authentik.js";
 import {
-  createSession, addPendingCreate, removeCleanup, recoverPendingCreates, issueTokens, refreshSession, TokenError,
+  createSession, addPendingCreate, removeCleanup, recoverPendingCreates, issueTokens, refreshSession, revokeToken, TokenError,
 } from "./sessions.js";
 import { createAuthDebugLogger } from "./auth-debug.js";
 
@@ -523,6 +523,29 @@ export function createOAuthHandlers(cfg, deps = {}) {
     }
   };
 
+  // RFC 7009 revocation: form or JSON, parameter token, optional token_type_hint. A refresh
+  // token (current, replay or spent) or an access token of this server ends its session.
+  // Unknown or invalid tokens are answered with 200 as well; only a missing token is 400.
+  const revoke = async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    res.set("Pragma", "no-cache");
+    const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+    const tokenValue = str(own(body, "token"));
+    if (!tokenValue) return tokenError(res, 400, "invalid_request");
+    if (!store) {
+      console.error("[revoke] no store configured");
+      return tokenError(res, 500, "server_error");
+    }
+    try {
+      if (await revokeToken(sessionDeps, tokenValue, str(own(body, "token_type_hint")))) log("token_revoked", {});
+    } catch (e) {
+      // The session could not be ended (store write failed): not revoked, so no 200.
+      console.error(`[revoke] failed: ${e?.code || e?.name || "error"}`);
+      return tokenError(res, 503, "temporarily_unavailable");
+    }
+    return res.status(200).json({});
+  };
+
   const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
   return {
@@ -532,6 +555,7 @@ export function createOAuthHandlers(cfg, deps = {}) {
     complete: wrap(complete),
     consent: wrap(consent),
     token: wrap(token),
+    revoke: wrap(revoke),
     consumeCode,
     sweep,
     stats: () => ({ flows: flows.size(), pendings: pendings.size(), codes: codes.size() }),
@@ -546,5 +570,6 @@ export function createOAuthRouter(h) {
   router.get("/oauth/complete", h.complete);
   router.post("/oauth/consent", h.consent);
   router.post("/oauth/token", h.token);
+  router.post("/oauth/revoke", h.revoke);
   return router;
 }

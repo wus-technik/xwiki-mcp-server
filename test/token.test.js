@@ -47,7 +47,9 @@ function makeApp({ file, fsImpl, clock, opts = {}, calls }) {
     whoami: async () => USER,
     createToken: async () => ({ token: "XW-TOKEN-SECRET", consentId: `${USER}^XWiki.OIDC.ConsentClass[0]`, expiresAt: clock.now + 90 * DAY }),
     findTokensByPrefix: async () => [],
-    deleteToken: async () => "deleted",
+    // endSession starts runCleanups in the background; XWiki "unreachable" keeps the cleanup
+    // entries in place so the tests can inspect what endSession recorded.
+    deleteToken: async () => { throw Object.assign(new Error("unavailable"), { code: "unavailable" }); },
   };
   const app = createApp({
     sessionSecret: SECRET, mcpBaseUrl: BASE, store, authentik, xwikiTokens,

@@ -6,7 +6,7 @@
 // Secrets rule: tokens, cookies and refresh tokens are only ever stored sealed and
 // never logged; log lines carry error codes only.
 import { randomUUID, randomBytes, createHash } from "node:crypto";
-import { SignJWT } from "jose";
+import { SignJWT, jwtVerify } from "jose";
 import { AuthentikRejected, AuthentikUnavailable } from "./authentik.js";
 
 export const sealAad = (sid, field) => `session:${sid}:${field}`;
@@ -66,11 +66,13 @@ export async function recoverPendingCreates(deps, { cookie, xwikiUser }) {
     .filter((c) => c && c.reason === "pending-create" && c.xwikiUser === xwikiUser && typeof c.appName === "string" && c.appName);
   for (const entry of entries) {
     try {
-      const fresh = deps.store.read();
-      const referenced = new Set();
-      for (const s of Object.values(fresh.sessions)) if (s?.consentId) referenced.add(s.consentId);
-      for (const c of Object.values(fresh.cleanups)) if (c && c.id !== entry.id && c.consentId) referenced.add(c.consentId);
+      // A token renewal of this user may be creating a token of this name right now
+      // (renewals do not take the login's per-user lock).
+      if (creationInFlight(deps.store.read(), entry, deps.now())) continue;
       const found = await deps.xwikiTokens.findTokensByPrefix({ cookie }, xwikiUser, entry.appName);
+      const fresh = deps.store.read();
+      if (creationInFlight(fresh, entry, deps.now())) continue;
+      const referenced = referencedConsents(fresh, entry.id);
       for (const t of found) {
         if (t.name !== entry.appName || referenced.has(t.consentId)) continue;
         await deps.xwikiTokens.deleteToken({ cookie }, { xwikiUser, consentId: t.consentId });
@@ -137,11 +139,17 @@ async function buildResponse(deps, session, refreshToken, nowMs) {
   };
 }
 
-// Minimal end of a session (Task 10 adds runCleanups after it): ONE mutate that records a
-// cleanup entry for the XWiki token and removes session and family. The XWiki token is
-// re-sealed under the cleanup's own AAD `cleanup:<id>:xwikiToken`, so the entry can be
-// opened without the (deleted) session id. No XWiki calls here.
-export async function endSession(deps, sid, reason) {
+// Ends a session: ONE mutate records a cleanup entry for the XWiki token and removes session
+// and family (no-op if the session is already gone). The XWiki token is re-sealed under the
+// cleanup's own AAD `cleanup:<id>:xwikiToken`, so the entry can be opened without the
+// (deleted) session id. Afterwards runCleanups is triggered.
+//
+// Locking: endSession never takes the session lock; callers that touch a session hold
+// `session:<sid>` (withLock is not reentrant).
+// Cleanup: by default runCleanups runs in the background (request paths must not wait for
+// XWiki); errors are logged with their code only. `{ awaitCleanup: true }` waits for it
+// (tests, background jobs). Returns the cleanup id, or null if the session was already gone.
+export async function endSession(deps, sid, reason, { awaitCleanup = false } = {}) {
   const { store } = deps;
   const id = randomUUID();
   const now = deps.now();
@@ -150,7 +158,7 @@ export async function endSession(deps, sid, reason) {
     const s = state.sessions[sid];
     if (!s) return;
     const xwikiTokenSealed = s.xwikiTokenSealed
-      ? store.sealField(store.openField(s.xwikiTokenSealed, sealAad(sid, "xwikiToken")), `cleanup:${id}:xwikiToken`)
+      ? store.sealField(store.openField(s.xwikiTokenSealed, sealAad(sid, "xwikiToken")), cleanupAad(id))
       : null;
     state.cleanups[id] = {
       id, xwikiTokenSealed, consentId: s.consentId ?? null, xwikiUser: s.xwikiUser,
@@ -162,13 +170,326 @@ export async function endSession(deps, sid, reason) {
     }
     ended = true;
   });
-  if (ended) console.warn(`[session] ended: ${reason}`);
-  return ended ? id : null;
+  if (!ended) return null;
+  console.warn(`[session] ended: ${reason}`);
+  if (awaitCleanup) await runCleanups(deps);
+  else triggerCleanups(deps);
+  return id;
 }
 
-// Renews the XWiki token when it has less than 14 days left.
-export async function renewXWikiToken(_deps, _sid) {
-  // implemented in Task 10
+// Only short lower-case error codes reach logs and the store, never messages.
+const errCode = (e) => (typeof e?.code === "string" && /^[a-z_]{1,40}$/.test(e.code) ? e.code : e?.name || "error");
+
+// Background run of runCleanups; never rejects.
+function triggerCleanups(deps) {
+  runCleanups(deps).catch((e) => console.warn(`[cleanup] run failed: ${errCode(e)}`));
+}
+
+// ---------------------------------------------------------------------------
+// Part 3: cleanups, XWiki token renewal, daily reconcile, background timers, revocation.
+
+const cleanupAad = (id) => `cleanup:${id}:xwikiToken`;
+const CLEANUP_WARN_AGE_MS = 7 * DAY_MS;
+// A pending-create entry this young may belong to a token creation still in flight (login
+// or renewal); tokens of that name are then left alone in this run.
+const IN_FLIGHT_MS = 10 * 60 * 1000;
+const ORPHAN_MS = 10 * 60 * 1000;
+const CLIENT_IDLE_MS = 30 * DAY_MS;
+const TOKEN_DAYS = 90;
+
+// Single-flight state per store (deps objects differ between callers, the store does not).
+const cleanupRuns = new WeakMap();
+const reconcileRuns = new WeakMap();
+
+// Deletes the XWiki tokens of cleanup entries. Single-flight: a call while a run is active
+// returns that run's promise and makes it do one more pass for entries added meanwhile.
+// Every entry is attempted at most once per run (no retry loops); failures count attempts
+// and keep the entry for the next run (hourly, daily, next endSession).
+export function runCleanups(deps) {
+  let run = cleanupRuns.get(deps.store);
+  if (run) {
+    run.again = true;
+    return run.promise;
+  }
+  run = { again: false, tried: new Set() };
+  cleanupRuns.set(deps.store, run);
+  run.promise = (async () => {
+    try {
+      do {
+        run.again = false;
+        await cleanupPass(deps, run.tried);
+      } while (run.again);
+    } finally {
+      cleanupRuns.delete(deps.store);
+    }
+  })();
+  return run.promise;
+}
+
+async function cleanupPass(deps, tried) {
+  const now = deps.now();
+  const entries = Object.values(deps.store.read().cleanups).filter((c) => c && typeof c.id === "string");
+  for (const entry of entries) {
+    if (tried.has(entry.id)) continue;
+    tried.add(entry.id);
+    if (now - (entry.createdAt || 0) > CLEANUP_WARN_AGE_MS) {
+      console.warn(`[cleanup] entry older than 7 days: id=${entry.id} xwikiUser=${entry.xwikiUser} reason=${entry.reason}`);
+    }
+    try {
+      if (entry.reason === "pending-create") await cleanupPending(deps, entry);
+      else await cleanupToken(deps, entry);
+    } catch (e) {
+      await recordFailure(deps, entry.id, errCode(e));
+    }
+  }
+}
+
+async function recordFailure(deps, id, code) {
+  try {
+    await deps.store.mutate((state) => {
+      const c = state.cleanups[id];
+      if (!c) return;
+      c.attempts = (c.attempts || 0) + 1;
+      c.lastError = code;
+    });
+  } catch (e) {
+    console.warn(`[cleanup] store write failed: ${errCode(e)}`);
+  }
+}
+
+async function cleanupToken(deps, entry) {
+  if (!entry.xwikiTokenSealed || !entry.consentId) throw Object.assign(new Error("no token"), { code: "no_token" });
+  const bearer = deps.store.openField(entry.xwikiTokenSealed, cleanupAad(entry.id));
+  // "deleted" and "gone" both mean done; every XWikiTokenError throws and is retried later.
+  await deps.xwikiTokens.deleteToken({ bearer }, { xwikiUser: entry.xwikiUser, consentId: entry.consentId });
+  await removeCleanup(deps, entry.id);
+}
+
+// consentIds owned by sessions or other cleanup entries: never deleted as leftovers.
+function referencedConsents(state, exceptId) {
+  const referenced = new Set();
+  for (const s of Object.values(state.sessions)) if (s?.consentId) referenced.add(s.consentId);
+  for (const c of Object.values(state.cleanups)) if (c && c.id !== exceptId && c.consentId) referenced.add(c.consentId);
+  return referenced;
+}
+
+// True if a creation of a token named like `entry` may still be running: a young
+// pending-create entry for the same user and name (the entry itself included).
+function creationInFlight(state, entry, now) {
+  return Object.values(state.cleanups).some((c) => c && c.reason === "pending-create"
+    && c.xwikiUser === entry.xwikiUser && c.appName === entry.appName && now - (c.createdAt || 0) < IN_FLIGHT_MS);
+}
+
+// R16 outside the login: needs a credential of the same XWiki user, i.e. the bearer of one of
+// the user's live sessions. Without one the entry stays untouched; the next login recovers it.
+// Deleting another consent of the same user with a valid bearer works (fixture README 0.5).
+async function cleanupPending(deps, entry) {
+  const { store } = deps;
+  const state = store.read();
+  if (typeof entry.appName !== "string" || !entry.appName) return;
+  if (creationInFlight(state, entry, deps.now())) return;
+  const live = Object.values(state.sessions).find((s) => s?.xwikiUser === entry.xwikiUser && s.xwikiTokenSealed);
+  if (!live) return;
+  const bearer = store.openField(live.xwikiTokenSealed, sealAad(live.sid, "xwikiToken"));
+  const found = await deps.xwikiTokens.findTokensByPrefix({ bearer }, entry.xwikiUser, entry.appName);
+  // Re-read after the XWiki call: a creation that started meanwhile has its pending entry
+  // (or, if finished, its session) in the store by now.
+  const fresh = store.read();
+  if (!fresh.cleanups[entry.id] || creationInFlight(fresh, entry, deps.now())) return;
+  const referenced = referencedConsents(fresh, entry.id);
+  for (const t of found) {
+    if (t.name !== entry.appName || referenced.has(t.consentId)) continue;
+    await deps.xwikiTokens.deleteToken({ bearer }, { xwikiUser: entry.xwikiUser, consentId: t.consentId });
+  }
+  await removeCleanup(deps, entry.id);
+}
+
+// Renews the XWiki token (called by refreshSession under `session:<sid>` when less than 14
+// days are left). The new token is created with the current one as bearer and replaces it in
+// ONE mutate (tokenVersion + 1); the old token becomes a "renewed" cleanup entry. A
+// pending-create entry covers the window in which the token exists only in XWiki.
+// Never throws: on failure the session continues with its current token.
+export async function renewXWikiToken(deps, sid) {
+  const { store } = deps;
+  try {
+    const state = store.read();
+    const session = state.sessions[sid];
+    if (!session) return;
+    const clientName = state.clients[session.clientId]?.clientName || "unbenannter Client";
+    const appName = `xwiki-mcp – ${clientName} – ${new Date(deps.now()).toISOString().slice(0, 10)}`;
+    const xwikiUser = session.xwikiUser;
+    const pendingId = await addPendingCreate(deps, { xwikiUser, appName });
+    const current = store.openField(session.xwikiTokenSealed, sealAad(sid, "xwikiToken"));
+    let created;
+    try {
+      created = await deps.xwikiTokens.createToken({ bearer: current }, { xwikiUser, appName, days: TOKEN_DAYS });
+    } catch (e) {
+      const code = errCode(e);
+      console.warn(`[session] XWiki token renewal failed: ${code}`);
+      // login_required: nothing was created. Otherwise the marker stays for recovery.
+      if (code === "login_required") await removeCleanup(deps, pendingId);
+      return;
+    }
+    const oldId = randomUUID();
+    await store.mutate((draft) => {
+      delete draft.cleanups[pendingId];
+      const s = draft.sessions[sid];
+      if (!s) {
+        // Session vanished meanwhile: the new token must go, too.
+        draft.cleanups[oldId] = {
+          id: oldId, xwikiTokenSealed: store.sealField(created.token, cleanupAad(oldId)), consentId: created.consentId,
+          xwikiUser, reason: "renewed", createdAt: deps.now(), attempts: 0, lastError: null,
+        };
+        return;
+      }
+      draft.cleanups[oldId] = {
+        id: oldId,
+        xwikiTokenSealed: store.sealField(store.openField(s.xwikiTokenSealed, sealAad(sid, "xwikiToken")), cleanupAad(oldId)),
+        consentId: s.consentId ?? null, xwikiUser: s.xwikiUser, reason: "renewed",
+        createdAt: deps.now(), attempts: 0, lastError: null,
+      };
+      s.xwikiTokenSealed = store.sealField(created.token, sealAad(sid, "xwikiToken"));
+      s.consentId = created.consentId;
+      s.tokenExpiresAt = created.expiresAt;
+      s.tokenVersion = (s.tokenVersion || 1) + 1;
+    });
+    triggerCleanups(deps);
+  } catch (e) {
+    console.warn(`[session] XWiki token renewal failed: ${errCode(e)}`);
+  }
+}
+
+// Daily reconcile with Authentik for every session (under its session lock): idle sessions
+// and sessions whose code exchange never completed end; otherwise the stored Authentik refresh
+// token is rotated and the user's group membership checked. lastClientRefreshAt is never
+// touched, so this does not extend the 30-day idle limit. Afterwards cleanups, expired upload
+// nonces and unused clients. Single-flight per store.
+export function dailyReconcile(deps) {
+  const running = reconcileRuns.get(deps.store);
+  if (running) return running;
+  const p = reconcile(deps).finally(() => reconcileRuns.delete(deps.store));
+  reconcileRuns.set(deps.store, p);
+  return p;
+}
+
+async function reconcile(deps) {
+  const { store } = deps;
+  for (const sid of Object.keys(store.read().sessions)) {
+    try {
+      await store.withLock(lockKey(sid), () => reconcileSession(deps, sid));
+    } catch (e) {
+      console.warn(`[reconcile] session check failed: ${errCode(e)}`);
+    }
+  }
+  await runCleanups(deps);
+  const now = deps.now();
+  await store.mutate((state) => {
+    for (const [nonce, exp] of Object.entries(state.uploadNonces)) {
+      if (!(typeof exp === "number" && exp > now)) delete state.uploadNonces[nonce];
+    }
+    const used = new Set(Object.values(state.sessions).map((s) => s?.clientId));
+    for (const [clientId, c] of Object.entries(state.clients)) {
+      if (used.has(clientId) || now - (c?.lastUsedAt || 0) <= CLIENT_IDLE_MS) continue;
+      delete state.clients[clientId];
+      for (const key of Object.keys(state.grants)) {
+        if (key.slice(key.lastIndexOf("|") + 1) === clientId) delete state.grants[key];
+      }
+    }
+  });
+}
+
+async function reconcileSession(deps, sid) {
+  const { store, authentik } = deps;
+  const state = store.read();
+  const session = state.sessions[sid];
+  if (!session) return;
+  const now = deps.now();
+  if (now - session.lastClientRefreshAt > IDLE_MS) {
+    await endSession(deps, sid, "idle");
+    return;
+  }
+  const family = state.families[session.familyId];
+  if ((!family || family.currentHash === null) && now - session.createdAt > ORPHAN_MS) {
+    await endSession(deps, sid, "orphan");
+    return;
+  }
+  // Returns normally if the session check is over (ended or skipped); rethrows the rest.
+  const handle = async (e) => {
+    if (e instanceof AuthentikRejected) await endSession(deps, sid, "authentik-rejected");
+    else if (!(e instanceof AuthentikUnavailable)) throw e; // unavailable: try again tomorrow
+  };
+  let ak;
+  try {
+    ak = await authentik.refresh(store.openField(session.authentikRefreshSealed, sealAad(sid, "authentikRefresh")));
+  } catch (e) {
+    return handle(e);
+  }
+  const authentikRefreshSealed = store.sealField(ak.refreshToken, sealAad(sid, "authentikRefresh"));
+  await store.mutate((draft) => {
+    const s = draft.sessions[sid];
+    if (s) s.authentikRefreshSealed = authentikRefreshSealed;
+  });
+  try {
+    await authentik.checkUser(ak.accessToken);
+  } catch (e) {
+    return handle(e);
+  }
+}
+
+// Background jobs: first reconcile 5 min after start, then every 24 h; cleanups hourly.
+// Timers are unref'd; returns stop() (tests).
+export function startBackground(deps, {
+  firstDelayMs = 5 * 60 * 1000, reconcileEveryMs = DAY_MS, cleanupEveryMs = 60 * 60 * 1000,
+} = {}) {
+  const reconcileNow = () => dailyReconcile(deps).catch((e) => console.warn(`[reconcile] run failed: ${errCode(e)}`));
+  let daily = null;
+  const first = setTimeout(() => {
+    reconcileNow();
+    daily = setInterval(reconcileNow, reconcileEveryMs);
+    daily.unref?.();
+  }, firstDelayMs);
+  first.unref?.();
+  const hourly = setInterval(() => triggerCleanups(deps), cleanupEveryMs);
+  hourly.unref?.();
+  return () => {
+    clearTimeout(first);
+    if (daily) clearInterval(daily);
+    clearInterval(hourly);
+  };
+}
+
+// RFC 7009: maps a refresh token (current, replay or spent) or an access token of this
+// server to its session and ends it with reason "revoked". An access token counts if its
+// signature, issuer and audience are valid; expiry alone does not stop the revocation.
+// Unknown tokens are ignored. The hint only changes the order of the lookups.
+export async function revokeToken(deps, token, hint) {
+  if (typeof token !== "string" || !token) return false;
+  const byRefresh = () => findFamily(deps.store.read(), hashRefreshToken(token))?.sid ?? null;
+  const byAccess = () => sidFromAccessToken(deps, token);
+  const sid = hint === "access_token"
+    ? (await byAccess()) ?? byRefresh()
+    : byRefresh() ?? (await byAccess());
+  if (!sid) return false;
+  await deps.store.withLock(lockKey(sid), () => endSession(deps, sid, "revoked"));
+  return true;
+}
+
+async function sidFromAccessToken(deps, token) {
+  const { cfg } = deps;
+  if (!token.includes(".")) return null;
+  const opts = { issuer: cfg.mcpBaseUrl, audience: cfg.mcpBaseUrl, algorithms: ["HS256"], currentDate: new Date(deps.now()) };
+  let payload;
+  try {
+    ({ payload } = await jwtVerify(token, new TextEncoder().encode(cfg.sessionSecret), opts));
+  } catch (e) {
+    // jose checks the signature before the claims, so an expired token got here genuine;
+    // issuer and audience are checked by hand because claim validation may have stopped early.
+    if (e?.code !== "ERR_JWT_EXPIRED" || !e.payload) return null;
+    payload = e.payload;
+    const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+    if (payload.iss !== cfg.mcpBaseUrl || !aud.includes(cfg.mcpBaseUrl)) return null;
+  }
+  return typeof payload.sid === "string" && payload.sid ? payload.sid : null;
 }
 
 // After a successful code exchange: first refresh token of the family plus access token.
