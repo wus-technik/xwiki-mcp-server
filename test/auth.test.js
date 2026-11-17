@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import request from "supertest";
 import express from "express";
 import { createOAuthRouter } from "../src/oauth.js";
+import { mountMetadata } from "../src/metadata.js";
 import { createAuthMiddleware } from "../src/auth-middleware.js";
 import { createSession } from "../src/session-store.js";
 import { createApp } from "../src/app.js";
@@ -27,20 +28,24 @@ function makeTestApp(overrides = {}) {
 }
 
 test("GET /.well-known/oauth-protected-resource returns resource metadata", async () => {
-  const app = makeTestApp();
+  const app = express();
+  mountMetadata(app, { mcpBaseUrl: "https://mcp.example.com" });
   const res = await request(app).get("/.well-known/oauth-protected-resource");
   assert.equal(res.status, 200);
   assert.equal(res.body.resource, "https://mcp.example.com");
   assert.deepEqual(res.body.authorization_servers, ["https://mcp.example.com"]);
+  assert.deepEqual(res.body.scopes_supported, ["xwiki"]);
 });
 
 test("GET /.well-known/oauth-authorization-server returns AS metadata", async () => {
-  const app = makeTestApp();
+  const app = express();
+  mountMetadata(app, { mcpBaseUrl: "https://mcp.example.com" });
   const res = await request(app).get("/.well-known/oauth-authorization-server");
   assert.equal(res.status, 200);
   assert.equal(res.body.authorization_endpoint, "https://mcp.example.com/oauth/authorize");
   assert.equal(res.body.token_endpoint, "https://mcp.example.com/oauth/token");
   assert.deepEqual(res.body.code_challenge_methods_supported, ["S256"]);
+  assert.deepEqual(res.body.grant_types_supported, ["authorization_code", "refresh_token"]);
 });
 
 test("GET /oauth/authorize with missing params returns 400", async () => {

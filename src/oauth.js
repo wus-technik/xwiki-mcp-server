@@ -35,27 +35,6 @@ export function createOAuthHandlers(cfg) {
 
   const jwtSecret = new TextEncoder().encode(sessionSecret);
 
-  const resourceMetadata = (_req, res) => {
-    res.json({
-      resource: mcpBaseUrl,
-      authorization_servers: [mcpBaseUrl],
-      bearer_methods_supported: ["header"],
-      scopes_supported: ["openid", "profile", "email"],
-    });
-  };
-
-  const asMetadata = (_req, res) => {
-    res.json({
-      issuer: mcpBaseUrl,
-      authorization_endpoint: `${mcpBaseUrl}/oauth/authorize`,
-      token_endpoint: `${mcpBaseUrl}/oauth/token`,
-      registration_endpoint: `${mcpBaseUrl}/oauth/register`,
-      response_types_supported: ["code"],
-      grant_types_supported: ["authorization_code"],
-      code_challenge_methods_supported: ["S256"],
-    });
-  };
-
   const register = async (req, res) => {
     const body = req.body;
     const uris = body && typeof body === "object" ? body.redirect_uris : undefined;
@@ -225,15 +204,13 @@ export function createOAuthHandlers(cfg) {
     res.json({ message: "Logged out." });
   };
 
-  return { resourceMetadata, asMetadata, register, authorize, callback, complete, token, logout };
+  return { register, authorize, callback, complete, token, logout };
 }
 
 export function createOAuthRouter(cfg) {
   const h = createOAuthHandlers(cfg);
   const router = Router();
 
-  router.get("/.well-known/oauth-protected-resource", h.resourceMetadata);
-  router.get("/.well-known/oauth-authorization-server", h.asMetadata);
   router.post("/oauth/register", h.register);
   router.get("/oauth/authorize", h.authorize);
   router.get("/oauth/callback", h.callback);

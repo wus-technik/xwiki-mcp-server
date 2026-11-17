@@ -2,6 +2,7 @@ import express from "express";
 import cookieParser from "cookie-parser";
 import { loadConfig } from "./config.js";
 import { createOAuthRouter, createOAuthHandlers } from "./oauth.js";
+import { mountMetadata } from "./metadata.js";
 import { createAuthMiddleware } from "./auth-middleware.js";
 import { createAuthDebugLogger } from "./auth-debug.js";
 import { createSseRouter } from "./sse-handler.js";
@@ -38,8 +39,7 @@ export function createApp(overrides = {}) {
     extraRedirectUris: cfg.extraRedirectUris || [],
   };
   const h = createOAuthHandlers(oauthCfg);
-  app.get("/.well-known/oauth-protected-resource", h.resourceMetadata);
-  app.get("/.well-known/oauth-authorization-server", h.asMetadata);
+  mountMetadata(app, cfg);
   app.post("/register", h.register);
   app.get("/authorize", h.authorize);
   app.post("/token", h.token);
