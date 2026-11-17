@@ -371,3 +371,50 @@ test("Wiederholung im Fenster mit anderer client_id -> invalid_grant, keine Antw
   const res = await refresh(ctx, first.refresh_token, CID2);
   assert.deepEqual(res.body, { error: "invalid_grant" });
 });
+
+test("PKCE-Verifier ausserhalb RFC 7636 (43-128, unreserved) -> invalid_grant, Code verbrannt", async () => {
+  const ctx = await setup();
+  for (const bad of ["short", `${"a".repeat(42)}+`, "a".repeat(129)]) {
+    const challenge = createHash("sha256").update(bad).digest("base64url");
+    const code = await getCode(ctx, { code_challenge: challenge });
+    const res = await request(ctx.app).post("/token").type("form").send(codeBody(code, { code_verifier: bad }));
+    assert.equal(res.status, 400, bad);
+    assert.deepEqual(res.body, { error: "invalid_grant" });
+    const again = await request(ctx.app).post("/token").type("form").send(codeBody(code));
+    assert.deepEqual(again.body, { error: "invalid_grant" });
+  }
+});
+
+test("Refresh ohne client_id gelingt; andere client_id -> invalid_grant", async () => {
+  const ctx = await setup();
+  const first = await login(ctx);
+  const res = await request(ctx.app).post("/token").type("form").send({ grant_type: "refresh_token", refresh_token: first.refresh_token });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  const other = await refresh(ctx, res.body.refresh_token, CID2);
+  assert.deepEqual(other.body, { error: "invalid_grant" });
+});
+
+test("Zweite Rotation in 30 s schliesst das Fenster des ersten Tokens: A->B->C, dann A -> Wiederverwendung", async () => {
+  const ctx = await setup();
+  const a = await login(ctx);
+  const b = await refresh(ctx, a.refresh_token);
+  assert.equal(b.status, 200);
+  ctx.clock.now += 5_000;
+  const c = await refresh(ctx, b.body.refresh_token);
+  assert.equal(c.status, 200);
+  ctx.clock.now += 5_000; // A is only 10 s old, but the single replay slot now holds B
+  const res = await refresh(ctx, a.refresh_token);
+  assert.deepEqual(res.body, { error: "invalid_grant" });
+  assert.equal(onlySession(ctx), null);
+  assert.equal(Object.values(ctx.store.read().cleanups)[0].reason, "refresh-reuse");
+});
+
+test("Wiederholung genau bei now === replay.until -> Wiederverwendung, Sitzung beendet", async () => {
+  const ctx = await setup();
+  const a = await login(ctx);
+  assert.equal((await refresh(ctx, a.refresh_token)).status, 200);
+  ctx.clock.now += 30_000;
+  const res = await refresh(ctx, a.refresh_token);
+  assert.deepEqual(res.body, { error: "invalid_grant" });
+  assert.equal(onlySession(ctx), null);
+});

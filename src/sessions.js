@@ -238,6 +238,7 @@ export async function refreshSession(deps, { refreshToken, clientId }) {
     const family = state.families[familyId];
     let session = state.sessions[sid];
     if (!family || !session || family.sid !== sid) throw invalidGrant();
+    // Public client ids carry no security value; the binding is the refresh token itself.
     // Step 2 (checked wherever tokens would be handed out): client_id is optional for
     // public clients (RFC 6749 §6); if sent it must match the family.
     const clientOk = clientId === undefined || clientId === family.clientId;
@@ -245,6 +246,9 @@ export async function refreshSession(deps, { refreshToken, clientId }) {
 
     // Step 1: classify the presented token. Reuse of a spent token ends the session
     // whoever presents it.
+    // There is a single replay slot: a second rotation within 30 s (A→B→C) overwrites it
+    // with B, so A is then treated as reuse and ends the session. At now === until the
+    // window is closed (reuse as well).
     if (family.currentHash !== hash) {
       if (family.replay?.hash === hash && start < family.replay.until) {
         if (!clientOk) throw invalidGrant();
@@ -294,6 +298,7 @@ export async function refreshSession(deps, { refreshToken, clientId }) {
       s.lastClientRefreshAt = now;
       f.spentHashes = [...(f.spentHashes || []), hash].slice(-MAX_SPENT);
       f.currentHash = hashRefreshToken(newToken);
+      // Overwrites the previous slot; the token rotated before stays only in spentHashes.
       f.replay = { hash, responseSealed, until: now + REPLAY_MS };
       if (draft.clients[f.clientId]) draft.clients[f.clientId].lastUsedAt = now;
     });

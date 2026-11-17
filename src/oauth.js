@@ -22,6 +22,7 @@ const MAX_FLOWS = 10000; // /authorize is anonymous: cap the in-memory state
 const SWEEP_INTERVAL = 60 * 1000;
 const TOKEN_DAYS = 90;
 const CHALLENGE_RE = /^[A-Za-z0-9_-]{43,128}$/;
+const VERIFIER_RE = /^[A-Za-z0-9._~-]{43,128}$/; // RFC 7636 §4.1
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 class FlowFullError extends Error {}
@@ -479,6 +480,7 @@ export function createOAuthHandlers(cfg, deps = {}) {
     // Taken before any check: a failed attempt burns the code as well.
     const data = consumeCode(code);
     if (!data) return tokenError(res, 400, "invalid_grant");
+    if (!VERIFIER_RE.test(verifier)) return tokenError(res, 400, "invalid_grant");
     const computed = createHash("sha256").update(verifier).digest("base64url");
     if (!safeEqual(computed, data.codeChallenge)) return tokenError(res, 400, "invalid_grant");
     if (clientId !== data.clientId || redirectUri !== data.redirectUri) return tokenError(res, 400, "invalid_grant");
