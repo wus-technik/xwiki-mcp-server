@@ -6,7 +6,21 @@ const TAG_LEN = 16;
 
 const b64 = (buf) => buf.toString('base64url');
 
+const ALPHABET = /^[A-Za-z0-9_-]*$/;
+
+function decodeStrict(part) {
+  if (!ALPHABET.test(part)) throw new Error('invalid sealed value');
+  const buf = Buffer.from(part, 'base64url');
+  if (buf.toString('base64url') !== part) throw new Error('invalid sealed value');
+  return buf;
+}
+
+function checkAad(aad) {
+  if (typeof aad !== 'string') throw new Error('invalid aad');
+}
+
 export function seal(plaintext, key, aad) {
+  checkAad(aad);
   const iv = randomBytes(IV_LEN);
   const cipher = createCipheriv('aes-256-gcm', key, iv, { authTagLength: TAG_LEN });
   cipher.setAAD(Buffer.from(aad));
@@ -15,11 +29,12 @@ export function seal(plaintext, key, aad) {
 }
 
 export function open(sealed, key, aad) {
+  checkAad(aad);
   const parts = typeof sealed === 'string' ? sealed.split('.') : [];
   if (parts.length !== 4 || parts[0] !== PREFIX) throw new Error('invalid sealed value');
-  const iv = Buffer.from(parts[1], 'base64url');
-  const ct = Buffer.from(parts[2], 'base64url');
-  const tag = Buffer.from(parts[3], 'base64url');
+  const iv = decodeStrict(parts[1]);
+  const ct = decodeStrict(parts[2]);
+  const tag = decodeStrict(parts[3]);
   if (iv.length !== IV_LEN || tag.length !== TAG_LEN) throw new Error('invalid sealed value');
   try {
     const decipher = createDecipheriv('aes-256-gcm', key, iv, { authTagLength: TAG_LEN });

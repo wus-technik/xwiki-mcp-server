@@ -47,3 +47,48 @@ test('open throws on malformed input without leaking secrets', () => {
     });
   }
 });
+
+test('open rejects non-canonical base64url in any part', () => {
+  const [p, iv, ct, tag] = seal('plain-secret', key, 'a').split('.');
+  const variants = [
+    [p, iv + '!!', ct, tag],
+    [p, iv, ct + '!', tag],
+    [p, iv, ct, tag + '=='],
+    [p, iv + '==', ct, tag],
+    [p, iv, ct + ' ', tag],
+  ];
+  for (const v of variants) {
+    assert.throws(() => open(v.join('.'), key, 'a'), /invalid sealed value/);
+  }
+});
+
+test('open rejects truncated tag, flipped ciphertext and tag bytes', () => {
+  const [p, iv, ct, tag] = seal('plain-secret', key, 'a').split('.');
+  const flip = (s) => {
+    const b = Buffer.from(s, 'base64url');
+    b[0] ^= 1;
+    return b.toString('base64url');
+  };
+  const short = Buffer.from(tag, 'base64url').subarray(0, 12).toString('base64url');
+  assert.throws(() => open([p, iv, ct, short].join('.'), key, 'a'), /invalid sealed value/);
+  assert.throws(() => open([p, iv, flip(ct), tag].join('.'), key, 'a'), /decryption failed/);
+  assert.throws(() => open([p, iv, ct, flip(tag)].join('.'), key, 'a'), /decryption failed/);
+});
+
+test('open rejects non-string sealed values', () => {
+  for (const v of [undefined, null, 42, {}, Buffer.from('v1.a.b.c')]) {
+    assert.throws(() => open(v, key, 'a'), /invalid sealed value/);
+  }
+});
+
+test('wrong key/aad errors are generic', () => {
+  const s = seal('plain-secret', key, 'a');
+  assert.throws(() => open(s, key, 'b'), (e) => e.message === 'decryption failed');
+  assert.throws(() => open(s, randomBytes(32), 'a'), (e) => e.message === 'decryption failed');
+});
+
+test('non-string aad fails with generic error', () => {
+  assert.throws(() => seal('x', key, undefined), /invalid aad/);
+  const s = seal('x', key, 'a');
+  assert.throws(() => open(s, key, 5), /invalid aad/);
+});
