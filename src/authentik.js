@@ -61,9 +61,25 @@ export function createAuthentik({
     try {
       return await res.json();
     } catch {
-      return null;
+      // Unreadable body (parse error, abort/timeout while reading): not a verdict from Authentik.
+      throw new AuthentikUnavailable();
     }
   };
+
+  // Only genuine token/claim failures count as an invalid ID token; JWKS fetch problems
+  // (timeout, network, non-200) are infrastructure errors.
+  const INVALID_TOKEN_CODES = new Set([
+    "ERR_JWT_CLAIM_VALIDATION_FAILED",
+    "ERR_JWT_EXPIRED",
+    "ERR_JWT_INVALID",
+    "ERR_JWS_INVALID",
+    "ERR_JWS_SIGNATURE_VERIFICATION_FAILED",
+    "ERR_JOSE_ALG_NOT_ALLOWED",
+    "ERR_JOSE_NOT_SUPPORTED",
+    "ERR_JWKS_NO_MATCHING_KEY",
+    "ERR_JWKS_MULTIPLE_MATCHING_KEYS",
+    "ERR_JWK_INVALID",
+  ]);
 
   return {
     authorizeUrl({ state, nonce }) {
@@ -85,9 +101,15 @@ export function createAuthentik({
       if (!body?.id_token) throw new AuthentikError("invalid_id_token", "Token response has no id_token");
       let payload;
       try {
-        ({ payload } = await jwtVerify(body.id_token, getKeys(), { issuer: idpIssuer, audience: clientId }));
-      } catch {
-        throw new AuthentikError("invalid_id_token", "ID token verification failed");
+        ({ payload } = await jwtVerify(body.id_token, getKeys(), {
+          issuer: idpIssuer,
+          audience: clientId,
+          algorithms: ["RS256"],
+          requiredClaims: ["exp"],
+        }));
+      } catch (e) {
+        if (INVALID_TOKEN_CODES.has(e?.code)) throw new AuthentikError("invalid_id_token", "ID token verification failed");
+        throw new AuthentikUnavailable("JWKS unavailable");
       }
       if (!expectedNonce || payload.nonce !== expectedNonce) {
         throw new AuthentikError("invalid_id_token", "ID token nonce mismatch");
@@ -104,7 +126,8 @@ export function createAuthentik({
 
     async refresh(refreshToken) {
       const res = await tokenRequest({ grant_type: "refresh_token", refresh_token: refreshToken });
-      if (!res.ok) throw new AuthentikRejected(`Refresh rejected (HTTP ${res.status})`);
+      if (res.status === 400 || res.status === 401) throw new AuthentikRejected(`Refresh rejected (HTTP ${res.status})`);
+      if (!res.ok) throw new AuthentikUnavailable(`Refresh failed (HTTP ${res.status})`);
       const body = await readJson(res);
       if (!body?.access_token) throw new AuthentikRejected("Refresh response has no access_token");
       // Authentik may not rotate the refresh token; keep the old one then.
@@ -115,7 +138,8 @@ export function createAuthentik({
       const res = await request(`${base}/application/o/userinfo/`, {
         headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
       });
-      if (!res.ok) throw new AuthentikRejected(`Userinfo rejected (HTTP ${res.status})`);
+      if (res.status === 401) throw new AuthentikRejected("Userinfo rejected (HTTP 401)");
+      if (!res.ok) throw new AuthentikUnavailable(`Userinfo failed (HTTP ${res.status})`);
       const body = await readJson(res);
       if (!Array.isArray(body?.groups)) throw new AuthentikRejected("Userinfo has no groups");
       if (!body.groups.some((g) => allowedGroups.includes(g))) throw new AuthentikRejected("User not in an allowed group");

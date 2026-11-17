@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { generateKeyPair, exportJWK, SignJWT, createLocalJWKSet } from "jose";
+import { generateKeyPair, exportJWK, SignJWT, createLocalJWKSet, errors } from "jose";
 import {
   createAuthentik,
   AuthentikError,
@@ -16,14 +16,14 @@ const jwks = createLocalJWKSet({ keys: [jwk] });
 
 async function idToken(over = {}, { exp = "5m" } = {}) {
   const claims = { nonce: "n1", preferred_username: "alice", ...over.claims };
-  return new SignJWT(claims)
-    .setProtectedHeader({ alg: "RS256", kid: "k1" })
+  const jwt = new SignJWT(claims)
+    .setProtectedHeader({ alg: over.alg ?? "RS256", kid: "k1" })
     .setIssuer(over.iss ?? IDP_ISS)
     .setAudience(over.aud ?? "cid")
     .setSubject("sub-1")
-    .setIssuedAt()
-    .setExpirationTime(exp)
-    .sign(privateKey);
+    .setIssuedAt();
+  if (exp !== null) jwt.setExpirationTime(exp);
+  return jwt.sign(over.key ?? privateKey);
 }
 
 const json = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
@@ -152,4 +152,53 @@ test("checkUser: Gruppen und Fehlerabbildung", async () => {
   await assert.rejects(make(async () => json(401, {})).checkUser("at"), AuthentikRejected);
   await assert.rejects(make(async () => json(502, {})).checkUser("at"), AuthentikUnavailable);
   await assert.rejects(make(async () => { throw new Error("x"); }).checkUser("at"), AuthentikUnavailable);
+});
+
+const timeoutErr = () => Object.assign(new Error("timed out"), { name: "AbortError" });
+
+test("Body-Lese-/Parse-Fehler -> Unavailable (refresh, checkUser, exchangeCode)", async () => {
+  const bad = (f) => async () => ({ ok: true, status: 200, json: f });
+  for (const f of [async () => { throw new SyntaxError("bad json"); }, async () => { throw timeoutErr(); }]) {
+    await assert.rejects(make(bad(f)).refresh("rt"), AuthentikUnavailable);
+    await assert.rejects(make(bad(f)).checkUser("at"), AuthentikUnavailable);
+    await assert.rejects(make(bad(f)).exchangeCode("c", "n1"), AuthentikUnavailable);
+  }
+});
+
+test("Statusabbildung: nur 400/401 (refresh) und 401 (userinfo) sind Rejected", async () => {
+  for (const s of [403, 404, 429, 302]) {
+    await assert.rejects(make(async () => json(s, {})).refresh("rt"), AuthentikUnavailable, `refresh ${s}`);
+    await assert.rejects(make(async () => json(s, {})).checkUser("at"), AuthentikUnavailable, `userinfo ${s}`);
+  }
+  for (const s of [400, 401]) await assert.rejects(make(async () => json(s, {})).refresh("rt"), AuthentikRejected);
+  await assert.rejects(make(async () => json(401, {})).checkUser("at"), AuthentikRejected);
+  await assert.rejects(make(async () => json(400, {})).checkUser("at"), AuthentikUnavailable);
+});
+
+test("ID-Token ohne exp wird abgelehnt", async () => {
+  const id_token = await idToken({}, { exp: null });
+  const a = make(async () => json(200, { id_token, refresh_token: "rt" }));
+  await assert.rejects(a.exchangeCode("c", "n1"), (e) => e.code === "invalid_id_token");
+});
+
+test("JWKS-Timeout/Netzfehler -> Unavailable, Signaturfehler -> invalid_id_token", async () => {
+  const id_token = await idToken();
+  const f = async () => json(200, { id_token, refresh_token: "rt" });
+  for (const err of [new errors.JWKSTimeout(), new TypeError("fetch failed"), new errors.JOSEError("Expected 200 OK")]) {
+    const a = make(f, { jwks: async () => { throw err; } });
+    await assert.rejects(a.exchangeCode("c", "n1"), AuthentikUnavailable);
+  }
+  const other = await generateKeyPair("RS256");
+  const forged = await idToken({ key: other.privateKey });
+  const a = make(async () => json(200, { id_token: forged, refresh_token: "rt" }));
+  await assert.rejects(a.exchangeCode("c", "n1"), (e) => e.code === "invalid_id_token");
+});
+
+test("nur RS256 erlaubt: HS256 und ES256 abgelehnt", async () => {
+  const hs = await idToken({ alg: "HS256", key: new Uint8Array(32) });
+  const es = await idToken({ alg: "ES256", key: (await generateKeyPair("ES256")).privateKey });
+  for (const id_token of [hs, es]) {
+    const a = make(async () => json(200, { id_token, refresh_token: "rt" }));
+    await assert.rejects(a.exchangeCode("c", "n1"), (e) => e.code === "invalid_id_token");
+  }
 });
