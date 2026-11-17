@@ -217,6 +217,7 @@ test("createToken: Aufraeumen faellt auf Original-Auth zurueck", async () => {
 });
 
 const CID = (i) => `${USER}^XWiki.OIDC.ConsentClass[${i}]`;
+const OWN3 = `${USER}/3/abcDEF_-123`;
 
 test("deleteToken: erfolgreich", async () => {
   const { api, calls } = mk((url, init) => {
@@ -237,13 +238,13 @@ test("deleteToken: erfolgreich", async () => {
 
 test("deleteToken: bereits widerrufener Bearer (whoami null) -> gone", async () => {
   const { api, calls } = mk(() => rest(null));
-  assert.equal(await api.deleteToken({ bearer: "b" }, { xwikiUser: USER, consentId: CID(3) }), "gone");
+  assert.equal(await api.deleteToken({ bearer: OWN3 }, { xwikiUser: USER, consentId: CID(3) }), "gone");
   assert.equal(calls.length, 1);
 });
 
 test("deleteToken: 401 mit eigenem Bearer -> gone", async () => {
   const { api } = mk((url) => (url === `${BASE}/rest/` ? rest(USER) : new Response("no", { status: 401 })));
-  assert.equal(await api.deleteToken({ bearer: "b" }, { xwikiUser: USER, consentId: CID(3) }), "gone");
+  assert.equal(await api.deleteToken({ bearer: OWN3 }, { xwikiUser: USER, consentId: CID(3) }), "gone");
 });
 
 test("deleteToken: 401 mit Cookie -> login_required", async () => {
@@ -298,4 +299,81 @@ test("Fehler enthalten nie Token, Cookie oder form_token", async () => {
       }
     }
   }
+});
+
+test("whoami: Status ungleich 200 wirft, Netzfehler wird unavailable", async () => {
+  for (const [status, code] of [[500, "unavailable"], [503, "unavailable"], [302, "unexpected_page"], [401, "unexpected_page"]]) {
+    const { api } = mk(() => new Response("x", { status }));
+    await assert.rejects(api.whoami({ bearer: "t" }), (e) => e.code === code, String(status));
+  }
+  const { api } = mk(() => { throw new Error("ECONNRESET secret " + COOKIE); });
+  await assert.rejects(api.whoami({ bearer: "t" }), (e) => e.code === "unavailable" && !e.message.includes(COOKIE));
+});
+
+test("deleteToken: 500 von /rest/ oder von der Seite ist nie gone", async () => {
+  const a = mk(() => new Response("x", { status: 500 }));
+  await assert.rejects(a.api.deleteToken({ bearer: OWN3 }, { xwikiUser: USER, consentId: CID(3) }), (e) => e.code === "unavailable");
+  const b = mk((url) => (url === `${BASE}/rest/` ? rest(USER) : new Response("x", { status: 502 })));
+  await assert.rejects(b.api.deleteToken({ bearer: OWN3 }, { xwikiUser: USER, consentId: CID(3) }), (e) => e.code === "unavailable");
+  const c = mk(() => ({ status: 200, headers: new Headers(), text: async () => { throw new Error("boom"); } }));
+  await assert.rejects(c.api.deleteToken({ cookie: COOKIE }, { xwikiUser: USER, consentId: CID(3) }), (e) => e.code === "unavailable");
+});
+
+test("deleteToken: fremder Bearer wird bei 401 / whoami null nicht als gone gewertet", async () => {
+  const a = mk((url) => (url === `${BASE}/rest/` ? rest(USER) : new Response("no", { status: 401 })));
+  await assert.rejects(a.api.deleteToken({ bearer: `${USER}/4/zzz` }, { xwikiUser: USER, consentId: CID(3) }), (e) => e.code === "login_required");
+  const b = mk(() => rest(null));
+  await assert.rejects(b.api.deleteToken({ bearer: `${USER}/4/zzz` }, { xwikiUser: USER, consentId: CID(3) }), (e) => e.code === "login_required");
+});
+
+test("parseConsentList: unbekannter Eintragsaufbau wirft statt Eintraege zu verlieren", () => {
+  const h = rawList.replace(
+    `${BOX}\n<strong>lab</strong>`,
+    `${BOX.replace('class="box"', 'class="box" data-x="1"')}\n<strong>lab</strong>`,
+  );
+  assert.notEqual(h, rawList);
+  assert.throws(() => parseConsentList(h), (e) => e.code === "unexpected_page");
+});
+
+test("parseCreatedToken: Token ausserhalb des Erfolgskastens zaehlt nicht", () => {
+  const h = rawCreated.replace('<div class="code">Bearer', '<div class="codex">Bearer')
+    .replace("</form>", '</form><div class="code">Bearer xwiki:XWiki.foellmann/9/ZZZ</div>');
+  assert.equal(parseCreatedToken(h), null);
+});
+
+test("POST-Antwort ohne form_token -> unexpected_page", async () => {
+  const noFT = CREATED.replace(/<input[^>]*form_token[^>]*>/g, "");
+  const { api } = mk(happyHandler({ created: noFT }));
+  await assert.rejects(api.createToken({ cookie: COOKIE }, req), (e) => e.code === "unexpected_page");
+});
+
+test("Namen mit Gedankenstrich: roh, numerisch und benannt; ungueltige Entity wirft nicht", async () => {
+  const name = "xwiki-mcp – Claude – 2026-11-18";
+  for (const enc of [name, name.replaceAll("–", "&#8211;"), name.replaceAll("–", "&ndash;"), name.replaceAll("–", "&#x2013;")]) {
+    const h = LIST.replace("<strong>lab</strong>", `<strong>${enc}</strong>`);
+    const { api } = mk(() => html(h));
+    const r = await api.findTokensByPrefix({ cookie: COOKIE }, USER, "xwiki-mcp – ");
+    assert.deepEqual(r.map((e) => e.name), [name]);
+  }
+  const bad = rawList.replace("<strong>lab</strong>", "<strong>x&#99999999;y&#xD800;</strong>");
+  assert.equal(parseConsentList(bad)[3].name, "x&#99999999;y&#xD800;");
+});
+
+test("createToken: whoami(neuer Token) null -> Loeschen per Original-Cookie", async () => {
+  let cookieDelete = false;
+  const { api } = mk((url, init) => {
+    if (url === `${BASE}/rest/`) return rest(null);
+    if (url === PAGE_URL && init.method === "POST") {
+      const p = new URLSearchParams(init.body);
+      if (p.has("oidc_consent_delete")) {
+        assert.equal(init.headers.Cookie, COOKIE);
+        cookieDelete = true;
+        return html(removeBox(CREATED, 6));
+      }
+      return html(CREATED);
+    }
+    return html(CREATED);
+  });
+  await assert.rejects(api.createToken({ cookie: COOKIE }, req), (e) => e.code === "identity_mismatch");
+  assert.ok(cookieDelete);
 });

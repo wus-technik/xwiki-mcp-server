@@ -17,10 +17,19 @@ export class XWikiTokenError extends Error {
 
 const DAY_MS = 86400000;
 
+function fromCode(raw, n) {
+  // Out-of-range or surrogate code points stay as raw text instead of throwing.
+  if (!Number.isInteger(n) || n < 0 || n > 0x10ffff || (n >= 0xd800 && n <= 0xdfff)) return raw;
+  return String.fromCodePoint(n);
+}
+
 function decodeEntities(s) {
   return s
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
-    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (m, h) => fromCode(m, parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (m, d) => fromCode(m, parseInt(d, 10)))
+    .replace(/&ndash;/g, "–")
+    .replace(/&mdash;/g, "—")
+    .replace(/&nbsp;/g, " ")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
@@ -28,10 +37,10 @@ function decodeEntities(s) {
     .replace(/&amp;/g, "&");
 }
 
-// Returns the balanced `div#userapplicationsPane` subtree, or null.
-function extractPane(html) {
+// Returns the balanced subtree starting at the first match of startRe, or null.
+function extractBalanced(html, startRe) {
   if (typeof html !== "string") return null;
-  const start = /<div\s[^>]*id="userapplicationsPane"[^>]*>/.exec(html);
+  const start = startRe.exec(html);
   if (!start) return null;
   const re = /<(\/?)div\b[^>]*>/g;
   re.lastIndex = start.index + start[0].length;
@@ -42,6 +51,10 @@ function extractPane(html) {
     if (depth === 0) return html.slice(start.index, m.index + m[0].length);
   }
   return null;
+}
+
+function extractPane(html) {
+  return extractBalanced(html, /<div\s[^>]*id="userapplicationsPane"[^>]*>/);
 }
 
 function requirePane(html) {
@@ -72,6 +85,9 @@ export function parseConsentList(html) {
   const re = /<div class="box">\s*<div class="pull-left">/g;
   let m;
   while ((m = re.exec(pane))) starts.push(m.index);
+  // Fail closed: every consent_id input in the pane must belong to a parsed entry.
+  const idInputs = (pane.match(/<input\b[^>]*\bname="consent_id"/g) || []).length;
+  if (idInputs !== starts.length) throw new XWikiTokenError("unexpected_page");
   return starts.map((from, i) => {
     const seg = pane.slice(from, i + 1 < starts.length ? starts[i + 1] : pane.length);
     const name = /<strong>([\s\S]*?)<\/strong>/.exec(seg);
@@ -92,9 +108,8 @@ export function parseConsentList(html) {
 function parseCreated(html) {
   const pane = extractPane(html);
   if (!pane) return null;
-  const box = /<div class="box successmessage">([\s\S]*?)<div class="box warningmessage">|<div class="box successmessage">([\s\S]*)$/.exec(pane);
-  if (!box) return null;
-  const seg = box[1] ?? box[2];
+  const seg = extractBalanced(pane, /<div class="box successmessage">/);
+  if (!seg) return null;
   const title = /<div class="box-title">([\s\S]*?)<\/div>/.exec(seg);
   const code = /<div class="code">\s*Bearer ([^<\s]+)\s*<\/div>/.exec(seg);
   if (!title || !code) return null;
@@ -125,12 +140,29 @@ function profilePageName(xwikiUser) {
 export function createXWikiTokens({ baseUrl, fetcher = fetch }) {
   const base = baseUrl.replace(/\/+$/, "");
 
+  // Network errors and unreadable bodies become a fixed "unavailable" error
+  // (never "gone"), so callers retry instead of treating the token as deleted.
+  async function send(url, init) {
+    try {
+      const res = await fetcher(url, init);
+      const text = init.wantText ? await res.text() : null;
+      return { res, text };
+    } catch {
+      throw new XWikiTokenError("unavailable");
+    }
+  }
+
+  // Returns the XWiki user, or null only for a 200 answer without a (non-guest)
+  // user header. Any other status is an error, never "no user".
   async function whoami(auth) {
-    const res = await fetcher(`${base}/rest/`, {
+    const { res } = await send(`${base}/rest/`, {
       method: "GET",
       headers: authHeaders(auth),
       redirect: "manual",
     });
+    if (res.status !== 200) {
+      throw new XWikiTokenError(res.status >= 500 ? "unavailable" : "unexpected_page", res.status);
+    }
     const user = res.headers.get("XWiki-User");
     if (!user || /(^|[:.])XWikiGuest$/.test(user)) return null;
     return user;
@@ -142,31 +174,41 @@ export function createXWikiTokens({ baseUrl, fetcher = fetch }) {
 
   async function pageRequest(auth, xwikiUser, params) {
     const headers = authHeaders(auth);
-    const init = { method: "GET", headers, redirect: "manual" };
+    const init = { method: "GET", headers, redirect: "manual", wantText: true };
     if (params) {
       init.method = "POST";
       init.headers = { ...headers, "Content-Type": "application/x-www-form-urlencoded" };
       init.body = new URLSearchParams(params).toString();
     }
-    const res = await fetcher(pageUrl(xwikiUser), init);
+    const { res, text } = await send(pageUrl(xwikiUser), init);
     const s = res.status;
     if ((s >= 300 && s < 400) || s === 401 || s === 403) throw new XWikiTokenError("login_required", s);
+    if (s >= 500) throw new XWikiTokenError("unavailable", s);
     if (s !== 200) throw new XWikiTokenError("unexpected_page", s);
-    const body = await res.text();
-    const pane = extractPane(body);
+    const pane = extractPane(text);
     if (!pane) throw new XWikiTokenError("unexpected_page", s);
-    return { html: body, pane };
+    const formToken = inputValue(pane, "form_token");
+    if (!formToken) throw new XWikiTokenError("unexpected_page", s);
+    return { html: text, pane, formToken };
   }
 
-  async function loadPage(auth, xwikiUser) {
-    const page = await pageRequest(auth, xwikiUser);
-    const formToken = inputValue(page.pane, "form_token");
-    if (!formToken) throw new XWikiTokenError("unexpected_page", 200);
-    return { ...page, formToken };
+  const loadPage = (auth, xwikiUser) => pageRequest(auth, xwikiUser);
+
+  // Contract: "gone" means the consent is really not valid any more. A revoked
+  // bearer (whoami null) or a 401 on the own bearer counts as gone only when
+  // the bearer belongs to consentId (same user and index segment); otherwise we
+  // cannot tell and throw. Transient failures (5xx, network) always throw.
+  function bearerOwns(auth, consentId) {
+    const m = /^(.+)\/(\d+)\/[^/]+$/.exec(auth.bearer || "");
+    return !!m && consentId === `${m[1]}^XWiki.OIDC.ConsentClass[${m[2]}]`;
   }
 
   async function deleteToken(auth, { xwikiUser, consentId }) {
-    if (auth && auth.bearer && (await whoami(auth)) === null) return "gone";
+    const own = !!auth.bearer && bearerOwns(auth, consentId);
+    if (auth.bearer && (await whoami(auth)) === null) {
+      if (own) return "gone";
+      throw new XWikiTokenError("login_required");
+    }
     try {
       const page = await loadPage(auth, xwikiUser);
       if (!parseConsentList(page.html).some((e) => e.consentId === consentId)) return "gone";
@@ -180,22 +222,25 @@ export function createXWikiTokens({ baseUrl, fetcher = fetch }) {
       }
       return "deleted";
     } catch (err) {
-      if (err instanceof XWikiTokenError && err.code === "login_required" && err.status === 401 && auth.bearer) {
+      if (own && err instanceof XWikiTokenError && err.code === "login_required" && err.status === 401) {
         return "gone";
       }
       throw err;
     }
   }
 
+  // Best effort: delete with the new bearer; if that fails or reports "gone"
+  // (bearer already invalid), retry with the original auth.
   async function cleanup(auth, token, target) {
     try {
-      await deleteToken({ bearer: token }, target);
+      if ((await deleteToken({ bearer: token }, target)) === "deleted") return;
     } catch {
-      try {
-        await deleteToken(auth, target);
-      } catch {
-        // best effort
-      }
+      // fall through
+    }
+    try {
+      await deleteToken(auth, target);
+    } catch {
+      // best effort
     }
   }
 
@@ -221,7 +266,14 @@ export function createXWikiTokens({ baseUrl, fetcher = fetch }) {
     const entry = parseConsentList(res.html).find((e) => e.consentId === consentId);
     if (!entry) throw new XWikiTokenError("unexpected_page");
     const expiresAt = entry.expiresAt || Date.now() + Number(days) * DAY_MS;
-    if ((await whoami({ bearer: token })) !== xwikiUser) {
+    let who;
+    try {
+      who = await whoami({ bearer: token });
+    } catch (err) {
+      await cleanup(auth, token, { xwikiUser, consentId });
+      throw err;
+    }
+    if (who !== xwikiUser) {
       await cleanup(auth, token, { xwikiUser, consentId });
       throw new XWikiTokenError("identity_mismatch");
     }
