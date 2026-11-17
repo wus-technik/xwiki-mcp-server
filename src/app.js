@@ -119,6 +119,10 @@ export function createApp(overrides = {}) {
     if (FLOW_PAGE_PATHS.has(req.path)) {
       return sendError(res, err.status, "Die Anfrage konnte nicht gelesen werden. Bitte im Programm erneut verbinden.", "invalid_request");
     }
+    if (req.path === "/token" || req.path === "/mcp/oauth/token") {
+      res.set("Cache-Control", "no-store");
+      res.set("Pragma", "no-cache");
+    }
     const isRegister = req.path === "/register" || req.path === "/mcp/oauth/register";
     res.status(err.status).json({ error: isRegister ? "invalid_client_metadata" : "invalid_request" });
   });

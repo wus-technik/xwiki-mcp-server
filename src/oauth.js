@@ -1,9 +1,10 @@
 import { Router } from "express";
 import { randomUUID, randomBytes, createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { SignJWT } from "jose";
 import { isAllowedRedirect, redirectMatches } from "./redirects.js";
 import { AuthentikError, AuthentikRejected, AuthentikUnavailable } from "./authentik.js";
-import { createSession, addPendingCreate, removeCleanup, recoverPendingCreates } from "./sessions.js";
+import {
+  createSession, addPendingCreate, removeCleanup, recoverPendingCreates, issueTokens, refreshSession, TokenError,
+} from "./sessions.js";
 import { createAuthDebugLogger } from "./auth-debug.js";
 
 // Login flow: /authorize → Authentik → XWiki login (same origin) → /oauth/complete
@@ -138,7 +139,6 @@ export function createOAuthHandlers(cfg, deps = {}) {
   const logger = deps.logger || createAuthDebugLogger(cfg.authDebug);
   const sessionDeps = { store, cfg, authentik, xwikiTokens, now };
 
-  const jwtSecret = new TextEncoder().encode(sessionSecret);
   const flows = ttlMap(now, STATE_TTL, MAX_FLOWS); // serverState → flow
   const pendings = ttlMap(now, PENDING_TTL); // pendingId → { flow, sub, username, authentikRefresh }
   const codes = ttlMap(now, CODE_TTL); // code → { sid, familyId, clientId, redirectUri, codeChallenge, resource }
@@ -461,31 +461,64 @@ export function createOAuthHandlers(cfg, deps = {}) {
     return finish(res, pending, xwikiUser, cookie, client);
   };
 
-  // Single-use authorization codes (5 min); the /token rewrite (Task 9) consumes them.
+  // Single-use authorization codes (5 min), consumed by /token.
   const consumeCode = (code) => codes.take(code);
 
-  // Interim code exchange until Task 9 replaces it with refresh/access tokens.
+  // /token (RFC 6749): public clients only (token_endpoint_auth_method none), no secret.
+  // Errors are JSON { error }; no request data or tokens are logged.
+  const tokenError = (res, status, error) => res.status(status).json({ error });
+
+  async function exchangeCode(req, res, body) {
+    const code = str(own(body, "code"));
+    const verifier = str(own(body, "code_verifier"));
+    const clientId = str(own(body, "client_id"));
+    const redirectUri = str(own(body, "redirect_uri"));
+    const resourceRaw = own(body, "resource");
+    if (!code || !verifier || !clientId || !redirectUri) return tokenError(res, 400, "invalid_request");
+    if (resourceRaw !== undefined && !str(resourceRaw)) return tokenError(res, 400, "invalid_request");
+    // Taken before any check: a failed attempt burns the code as well.
+    const data = consumeCode(code);
+    if (!data) return tokenError(res, 400, "invalid_grant");
+    const computed = createHash("sha256").update(verifier).digest("base64url");
+    if (!safeEqual(computed, data.codeChallenge)) return tokenError(res, 400, "invalid_grant");
+    if (clientId !== data.clientId || redirectUri !== data.redirectUri) return tokenError(res, 400, "invalid_grant");
+    // RFC 8707: the resource may be omitted; if sent it must name this server (and the
+    // one bound to the code, if any). Trailing slash tolerated as at /authorize.
+    if (resourceRaw !== undefined) {
+      const resource = resourceRaw.replace(/\/$/, "");
+      if (resource !== (data.resource || mcpBaseUrl)) return tokenError(res, 400, "invalid_target");
+    }
+    const response = await issueTokens(sessionDeps, { sid: data.sid, familyId: data.familyId, clientId: data.clientId });
+    log("token_issued", { sid: data.sid.slice(0, 8) });
+    return res.json(response);
+  }
+
   const token = async (req, res) => {
     res.set("Cache-Control", "no-store");
     res.set("Pragma", "no-cache");
-    const { grant_type, code, code_verifier, client_id, redirect_uri } = req.body || {};
-    if (grant_type !== "authorization_code") return res.status(400).json({ error: "unsupported_grant_type" });
-    if (typeof code !== "string" || typeof code_verifier !== "string") return res.status(400).json({ error: "invalid_request" });
-    const data = consumeCode(code);
-    if (!data) return res.status(400).json({ error: "invalid_grant" });
-    const computed = createHash("sha256").update(code_verifier).digest("base64url");
-    if (!safeEqual(computed, data.codeChallenge)) return res.status(400).json({ error: "invalid_grant" });
-    if ((client_id !== undefined && client_id !== data.clientId) || (redirect_uri !== undefined && redirect_uri !== data.redirectUri)) {
-      return res.status(400).json({ error: "invalid_grant" });
+    const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
+    const grantType = str(own(body, "grant_type"));
+    if (!grantType) return tokenError(res, 400, "invalid_request");
+    if (grantType !== "authorization_code" && grantType !== "refresh_token") return tokenError(res, 400, "unsupported_grant_type");
+    if (!store) {
+      console.error("[token] no store configured");
+      return tokenError(res, 500, "server_error");
     }
-    const session = store ? own(store.read().sessions, data.sid) : undefined;
-    if (!session) return res.status(400).json({ error: "invalid_grant" });
-    const accessToken = await new SignJWT({ sub: session.userId, sid: data.sid })
-      .setProtectedHeader({ alg: "HS256" })
-      .setExpirationTime("7d")
-      .setIssuedAt()
-      .sign(jwtSecret);
-    res.json({ access_token: accessToken, token_type: "Bearer", expires_in: 7 * 24 * 3600 });
+    try {
+      if (grantType === "authorization_code") return await exchangeCode(req, res, body);
+      const refreshToken = str(own(body, "refresh_token"));
+      const clientIdRaw = own(body, "client_id");
+      if (!refreshToken || (clientIdRaw !== undefined && !str(clientIdRaw))) return tokenError(res, 400, "invalid_request");
+      const response = await refreshSession(sessionDeps, { refreshToken, clientId: clientIdRaw });
+      return res.json(response);
+    } catch (e) {
+      if (e instanceof TokenError) {
+        log("token_failed", { error: e.code });
+        return tokenError(res, e.status, e.code);
+      }
+      console.error(`[token] failed: ${e?.code || e?.name || "error"}`);
+      return tokenError(res, 500, "server_error");
+    }
   };
 
   const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
