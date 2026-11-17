@@ -52,8 +52,8 @@ export function openStore({ file, key, fs = nodeFs, platform = process.platform 
     }
   }
 
-  function write(state) {
-    const buf = Buffer.from(JSON.stringify({ check: seal('ok', key, CHECK_AAD), state }), 'utf8');
+  function write(serializedState) {
+    const buf = Buffer.from(`{"check":${JSON.stringify(seal('ok', key, CHECK_AAD))},"state":${serializedState}}`, 'utf8');
     let tmp;
     try {
       let fd;
@@ -96,7 +96,7 @@ export function openStore({ file, key, fs = nodeFs, platform = process.platform 
   let state = load();
   if (state === null) {
     state = emptyState();
-    write(state);
+    write(JSON.stringify(state));
   }
 
   let chain = Promise.resolve();
@@ -109,8 +109,9 @@ export function openStore({ file, key, fs = nodeFs, platform = process.platform 
       const run = async () => {
         const draft = structuredClone(state);
         const result = await fn(draft);
-        write(draft);
-        state = structuredClone(draft);
+        const serialized = JSON.stringify(draft);
+        write(serialized);
+        state = JSON.parse(serialized);
         return result;
       };
       const p = chain.then(run);

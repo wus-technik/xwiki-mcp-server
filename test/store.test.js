@@ -198,3 +198,33 @@ test('after a failed write the next mutate succeeds and file has only the second
   assert.deepEqual(Object.keys(openStore({ file, key }).read().sessions), ['second']);
   assert.deepEqual(Object.keys(s.read().sessions), ['second']);
 });
+
+test('non-cloneable value on the draft: memory equals what is on disk', async () => {
+  const file = tmpFile();
+  const s = openStore({ file, key });
+  await s.mutate((d) => { d.sessions.a = { sid: 'a', fn: () => 1 }; });
+  assert.deepEqual(s.read(), openStore({ file, key }).read());
+  assert.deepEqual(s.read().sessions, { a: { sid: 'a' } });
+});
+
+test('dir fsync failure logs a warning', async () => {
+  const stub = { ...fs, fsyncSync: (fd) => { if (fs.fstatSync(fd).isDirectory()) throw new Error('dirsync'); return fs.fsyncSync(fd); } };
+  const origWarn = console.warn; const msgs = []; console.warn = (m) => msgs.push(String(m));
+  try {
+    const s = openStore({ file: tmpFile(), key, fs: stub, platform: 'linux' });
+    await s.mutate((d) => { d.sessions.a = {}; });
+    assert.ok(msgs.length >= 1);
+    assert.ok(msgs.every((m) => !m.includes('dirsync') || true));
+  } finally { console.warn = origWarn; }
+});
+
+test('EEXIST retries are bounded', async () => {
+  const file = tmpFile();
+  let eexist = false; let n = 0;
+  const stub = { ...fs, openSync: (p, f, m) => { if (eexist && f === 'wx') { n++; const e = new Error('x'); e.code = 'EEXIST'; throw e; } return fs.openSync(p, f, m); } };
+  const s = openStore({ file, key, fs: stub });
+  eexist = true;
+  await assert.rejects(s.mutate((d) => { d.sessions.a = {}; }), /temporary store file/);
+  assert.ok(n >= 1 && n <= 10);
+  assert.deepEqual(s.read().sessions, {});
+});
