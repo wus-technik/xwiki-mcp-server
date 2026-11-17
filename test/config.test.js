@@ -66,3 +66,8 @@ test("NODE_ENV mit Leerraum umgeht den TLS-Produktionsschutz nicht", () => {
   const cfg = loadConfig({ ...base, NODE_ENV: "production ", NODE_TLS_REJECT_UNAUTHORIZED: "0" });
   assert.throws(() => validateConfig(cfg), /NODE_TLS_REJECT_UNAUTHORIZED/);
 });
+
+test("authentikAppSlug: Default xwiki-mcp, Env getrimmt", () => {
+  assert.equal(loadConfig(base).authentikAppSlug, "xwiki-mcp");
+  assert.equal(loadConfig({ ...base, AUTHENTIK_APP_SLUG: "  other-app " }).authentikAppSlug, "other-app");
+});

@@ -18,6 +18,7 @@ export function loadConfig(env = process.env) {
     oauthClientSecret: env.OAUTH_CLIENT_SECRET || "",
     oauthRedirectUri: t(env.OAUTH_REDIRECT_URI) || "",
     authentikIssuer: stripSlash(env.AUTHENTIK_ISSUER),
+    authentikAppSlug: t(env.AUTHENTIK_APP_SLUG) || "xwiki-mcp",
     mcpBaseUrl: stripSlash(t(env.MCP_BASE_URL) || `http://localhost:${port}`),
     sessionSecret: env.SESSION_SECRET || "",
     tokenEncKeyRaw: t(env.TOKEN_ENC_KEY),
