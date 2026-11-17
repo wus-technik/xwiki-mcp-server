@@ -7,7 +7,7 @@ export function loadConfig(env = process.env) {
   const xwikiUrl = stripSlash(env.XWIKI_URL);
   return {
     port,
-    nodeEnv: env.NODE_ENV || "development",
+    nodeEnv: t(env.NODE_ENV) || "development",
     devTlsBypass: env.NODE_TLS_REJECT_UNAUTHORIZED === "0",
     xwikiUrl,
     // Public base URL for page links returned to MCP clients; xwikiUrl is usually an internal

@@ -62,3 +62,7 @@ test("SESSION_SECRET aus Leerzeichen wird abgelehnt", () => {
 test("STORE_FILE aus Leerzeichen gilt als fehlend", () => {
   assert.throws(() => validateConfig(loadConfig({ ...base, STORE_FILE: "   " })), /STORE_FILE/);
 });
+test("NODE_ENV mit Leerraum umgeht den TLS-Produktionsschutz nicht", () => {
+  const cfg = loadConfig({ ...base, NODE_ENV: "production ", NODE_TLS_REJECT_UNAUTHORIZED: "0" });
+  assert.throws(() => validateConfig(cfg), /NODE_TLS_REJECT_UNAUTHORIZED/);
+});
