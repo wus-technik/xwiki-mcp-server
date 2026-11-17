@@ -380,6 +380,17 @@ test("Fehler nach dem Anlegen leiten ueber Aufraeumen (form_token fehlt, Titel, 
   }
 });
 
+test("createToken: Erfolgskasten ohne Titel -> Token wird trotzdem aufgeraeumt", async () => {
+  const noTitle = CREATED.replace(/<div class="box-title">[^<]*<\/div>/g, "");
+  assert.notEqual(noTitle, CREATED);
+  const { h, deletes } = createThenCleanup(noTitle);
+  const { api } = mk(h);
+  await assert.rejects(api.createToken({ cookie: COOKIE }, req), (e) => e.code === "unexpected_page");
+  assert.equal(deletes.length, 1);
+  assert.equal(deletes[0].consent, `${USER}^XWiki.OIDC.ConsentClass[6]`);
+  assert.equal(deletes[0].auth, `Bearer ${TOKEN}`);
+});
+
 test("createToken: Antwort ohne extrahierbaren Token -> unexpected_page ohne Aufraeumen", async () => {
   const { h, deletes } = createThenCleanup(LIST);
   const { api } = mk(h);

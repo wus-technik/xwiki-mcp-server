@@ -112,8 +112,9 @@ function parseCreated(html) {
   if (!seg) return null;
   const title = /<div class="box-title">([\s\S]*?)<\/div>/.exec(seg);
   const code = /<div class="code">\s*Bearer ([^<\s]+)\s*<\/div>/.exec(seg);
-  if (!title || !code) return null;
-  return { title: decodeEntities(title[1].trim()), token: decodeEntities(code[1]) };
+  if (!code) return null;
+  // A missing title is reported as null so the caller can still clean the token up.
+  return { title: title ? decodeEntities(title[1].trim()) : null, token: decodeEntities(code[1]) };
 }
 
 export function parseCreatedToken(html) {
