@@ -857,15 +857,30 @@ for (const syntax of ["xwiki/2.1", "markdown/1.2", undefined]) {
     assert.deepEqual(await headingTitles(content, syntax), ["Before", "Later"]);
   });
 
-  test(`{{code}} opened after prose and {{/code}} closing mid-line (${syntax || "no syntax"})`, async () => {
+  test(`block {{code}} at line start, {{/code}} closing mid-line (${syntax || "no syntax"})`, async () => {
     const content = [
       "= Before =",
-      "Run: {{code language=\"bash\"}}",
+      "  {{code language=\"bash\"}}",
       "= inside =",
       "# auf docker101",
       "echo done {{/code}} and more prose",
       "= After =",
     ].join("\n");
+    assert.deepEqual(await headingTitles(content, syntax), ["Before", "After"]);
+  });
+
+  test(`{{code}} after prose is inline, not a block: nothing is masked (${syntax || "no syntax"})`, async () => {
+    const content = ["= Before =", "Run: {{code}}", "= Visible =", "{{/code}}", "= After ="].join("\n");
+    assert.deepEqual(await headingTitles(content, syntax), ["Before", "Visible", "After"]);
+  });
+
+  test(`escaped ~{{code}} opens no block (${syntax || "no syntax"})`, async () => {
+    const content = ["= Before =", "Write ~{{code}} to start", "~{{code}}", "= After =", "text"].join("\n");
+    assert.deepEqual(await headingTitles(content, syntax), ["Before", "After"]);
+  });
+
+  test(`{{code title="a}b"}} block hides its content (quote-aware params) (${syntax || "no syntax"})`, async () => {
+    const content = ["= Before =", "{{code title=\"a}b\" language=\"bash\"}}", "= hidden =", "# hidden too", "{{/code}}", "= After ="].join("\n");
     assert.deepEqual(await headingTitles(content, syntax), ["Before", "After"]);
   });
 }
@@ -889,4 +904,25 @@ test("markdown/1.2 page: ``` fence still hides # comments; section extraction us
   assert.deepEqual(await headingTitles(content, "markdown/1.2"), ["One", "Two"]);
   const page = await syntaxClient(content, "markdown/1.2").getPage("IT.WebHome", { heading: "One" }, SESSION);
   assert.ok(page.content.includes("# comment"));
+});
+
+test("xwiki/2.1: inline {{code}}…{{/code}} and {{{…}}} inside heading lines keep the headings", async () => {
+  const content = [
+    "= Example {{code}}hello{{/code}} =",
+    "text one",
+    "= Using {{{foo}}} =",
+    "text two",
+    "= Last =",
+  ].join("\n");
+  assert.deepEqual(await headingTitles(content, "xwiki/2.1"), ["Example {{code}}hello{{/code}}", "Using {{{foo}}}", "Last"]);
+  const client = syntaxClient(content, "xwiki/2.1");
+  const a = await client.getPage("IT.WebHome", { heading: "Example {{code}}hello{{/code}}" }, SESSION);
+  assert.equal(a.content, "= Example {{code}}hello{{/code}} =\ntext one");
+  const b = await client.getPage("IT.WebHome", { heading: "Using {{{foo}}}" }, SESSION);
+  assert.equal(b.content, "= Using {{{foo}}} =\ntext two");
+});
+
+test("xwiki/2.1: {{{ verbatim block at line start hides its content until }}}", async () => {
+  const content = ["= One =", "{{{", "= hidden =", "end }}} tail", "= Two ="].join("\n");
+  assert.deepEqual(await headingTitles(content, "xwiki/2.1"), ["One", "Two"]);
 });

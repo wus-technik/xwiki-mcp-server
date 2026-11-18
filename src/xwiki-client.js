@@ -278,22 +278,25 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch, s
     return null;
   }
 
-  // Per line: true if it belongs to a code block, where "# comment" or "= x =" lines are code,
-  // not headings. Which block kinds apply depends on the page syntax:
+  // Per line: true if it belongs to a code block in BLOCK form, where "# comment" or "= x ="
+  // lines are code, not headings. Inline forms (a pair on one line, an opener after prose,
+  // an escaped ~{{code}}) mask nothing. Which block kinds apply depends on the page syntax:
   //  - fenced blocks (``` / ~~~) only in Markdown (and unknown syntax). A backtick fence's
   //    info string must not contain a backtick (CommonMark), so ```x``` is inline code.
   //    Closed by a bare fence of the same character, at least as long.
-  //  - XWiki code macros {{code ...}} ... {{/code}} in every syntax (XWiki Markdown 1.2
-  //    supports macros too); an opener may follow prose, {{/code}} may sit mid-line, and a
-  //    self-closing {{code .../}} opens nothing.
-  //  - verbatim {{{ ... }}} in XWiki syntax (and unknown syntax), not in Markdown.
+  //  - XWiki code macros in every syntax (XWiki Markdown 1.2 supports macros too): the opener
+  //    {{code ...}} starts the line (after optional whitespace), is not self-closing and not
+  //    closed on the same line; parameters are quote-aware (title="a}b"). The block ends with
+  //    the line containing {{/code}}.
+  //  - verbatim {{{ in XWiki syntax (and unknown syntax), not in Markdown: opener at line
+  //    start without }}} on the same line; ends with the line containing }}}.
+  const CODE_MACRO_OPENER = /^\s*\{\{code(?:\s(?:"(?:[^"\\]|\\.)*"|[^}"])*?)?(\/)?\}\}/;
   function codeLineMask(lines, syntax) {
     const s = typeof syntax === "string" ? syntax.toLowerCase() : "";
     const markdown = s.startsWith("markdown");
     const xwiki = s.startsWith("xwiki");
     const fences = !xwiki;
     const verbatim = !markdown;
-    const MACRO_TOKENS = /\{\{\{|\}\}\}|\{\{code(?:\s[^}]*?)?(\/)?\}\}|\{\{\/code\}\}/g;
     const mask = [];
     let fence = null; // { char, len } while inside a fenced block
     let block = null; // "macro" | "verbatim" while inside an XWiki block
@@ -304,7 +307,12 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch, s
         if (close && close[1][0] === fence.char && close[1].length >= fence.len) fence = null;
         continue;
       }
-      if (!block && fences) {
+      if (block) {
+        mask.push(true);
+        if (line.includes(block === "macro" ? "{{/code}}" : "}}}")) block = null;
+        continue;
+      }
+      if (fences) {
         const open = line.match(/^ {0,3}(?:(`{3,})[^`]*|(~{3,}).*)$/);
         if (open) {
           const run = open[1] || open[2];
@@ -313,22 +321,19 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch, s
           continue;
         }
       }
-      let inCode = block !== null;
-      for (const m of line.matchAll(MACRO_TOKENS)) {
-        const token = m[0];
-        if (block === "macro") {
-          if (token === "{{/code}}") block = null;
-        } else if (block === "verbatim") {
-          if (token === "}}}") block = null;
-        } else if (token.startsWith("{{code") && !m[1]) {
-          block = "macro";
-          inCode = true;
-        } else if (token === "{{{" && verbatim) {
-          block = "verbatim";
-          inCode = true;
-        }
+      const macro = line.match(CODE_MACRO_OPENER);
+      if (macro && !macro[1] && !line.slice(macro[0].length).includes("{{/code}}")) {
+        block = "macro";
+        mask.push(true);
+        continue;
       }
-      mask.push(inCode);
+      const v = verbatim ? line.match(/^\s*\{\{\{/) : null;
+      if (v && !line.slice(v[0].length).includes("}}}")) {
+        block = "verbatim";
+        mask.push(true);
+        continue;
+      }
+      mask.push(false);
     }
     return mask;
   }
