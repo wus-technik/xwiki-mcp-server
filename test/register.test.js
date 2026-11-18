@@ -153,3 +153,18 @@ for (const uri of [
     assert.equal(res.body.error, "invalid_redirect_uri");
   });
 }
+
+for (const q of ["iss=x", "code=1", "state=s", "error=e", "error_description=d", "error_uri=u", "STATE=s"]) {
+  test(`DCR rejects reserved response parameter in the redirect query (${q})`, async () => {
+    const { app } = mk();
+    const res = await request(app).post("/register").send({ redirect_uris: [`http://localhost:3123/cb?a=1&${q}`] });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, "invalid_redirect_uri");
+  });
+}
+
+test("DCR still accepts a loopback redirect with an ordinary query", async () => {
+  const { app } = mk();
+  const res = await request(app).post("/register").send({ redirect_uris: ["http://localhost:3123/cb?a=1"] });
+  assert.equal(res.status, 201);
+});

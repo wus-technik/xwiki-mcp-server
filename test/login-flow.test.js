@@ -294,6 +294,7 @@ test("Zustimmung erteilt -> Code, Grant, Sitzung; zweiter Login ohne Zustimmungs
   const loc = new URL(res.headers.location);
   assert.equal(loc.origin + loc.pathname, CLAUDE_CB);
   assert.equal(loc.searchParams.get("state"), "client-state");
+  assert.equal(loc.searchParams.get("iss"), BASE, "RFC 9207 iss on the first-consent redirect");
   const code = loc.searchParams.get("code");
   assert.ok(code);
 
@@ -659,4 +660,15 @@ test("Autorisierungsfehler von Authentik -> access_denied mit iss (RFC 9207)", a
   const loc = new URL(cb.headers.location);
   assert.equal(loc.searchParams.get("error"), "access_denied");
   assert.equal(loc.searchParams.get("iss"), BASE);
+  assert.equal(loc.searchParams.get("state"), "client-state");
+});
+
+test("authorize mit reserviertem Parameter in redirect_uri -> Fehlerseite, kein Redirect", async () => {
+  const ctx = await setup();
+  await ctx.store.mutate((s) => {
+    s.clients["c-res"] = { clientId: "c-res", clientName: "X", redirectUris: ["http://localhost:3123/cb?a=1&iss=x"], createdAt: 1, lastUsedAt: 1 };
+  });
+  const r = await request(ctx.app).get("/authorize").query(authorizeQuery({ client_id: "c-res", redirect_uri: "http://localhost:3123/cb?a=1&iss=x" }));
+  assert.equal(r.status, 400);
+  assert.equal(r.headers.location, undefined);
 });

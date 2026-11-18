@@ -32,6 +32,15 @@ export function createApp(overrides = {}) {
   });
 
   const app = express();
+  // Express routes case-insensitively and tolerates "//"; the guards below compare exact
+  // paths. So non-canonical aliases of /mcp (other case, doubled slashes) are not served at all.
+  app.use((req, res, next) => {
+    const p = req.path;
+    if (/^\/+mcp(\/|$)/i.test(p) && (!/^\/mcp(\/|$)/.test(p) || p.includes("//"))) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    next();
+  });
   const authDebugLogger = createAuthDebugLogger(cfg.authDebug);
   // Origin check for every method on /mcp, mounted BEFORE the body parsers and the token check, so a
   // refused Origin wins over a malformed body or a missing token. Only browsers send Origin;
