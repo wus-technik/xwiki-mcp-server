@@ -51,8 +51,10 @@ export function createApp(overrides = {}) {
   };
 
   app.post("/mcp", transportGuard);
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: false }));
+  // Upload PUTs stream a raw body: the global parsers must not touch them.
+  const notUpload = (mw) => (req, res, next) => (req.method === "PUT" && req.path.startsWith("/mcp/uploads/") ? next() : mw(req, res, next));
+  app.use(notUpload(express.json()));
+  app.use(notUpload(express.urlencoded({ extended: false })));
   app.use(cookieParser());
 
   const authentik = overrides.authentik || createAuthentik({

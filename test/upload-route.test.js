@@ -195,3 +195,52 @@ test("a failing store write during reservation gives 503 and uploads nothing", a
   assert.equal(res.type, "text/plain");
   assert.equal(client.putAttachmentBytes.mock.calls.length, 0);
 });
+
+test("502 and 413 bodies are fixed texts; an upstream error message with a secret never leaks", async () => {
+  const { store } = newStore();
+  const sessionId = await newSession(store, "jack");
+  const mint = () => mintUploadToken({ sessionId, pagePath: "Main.WebHome", filename: "f.bin", secret: SECRET }).token;
+  const SENTINEL = "SENTINEL-BEARER-xyz";
+  const client = { putAttachmentBytes: mock.fn(async () => { throw new Error(`bad header Bearer ${SENTINEL}`); }) };
+  const r502 = await put(makeApp({ store, xwikiClient: client }).app, mint());
+  assert.equal(r502.status, 502);
+  assert.equal(r502.text, "Upload to XWiki failed");
+  assert.ok(!r502.text.includes(SENTINEL));
+  const r413 = await put(makeApp({ store, maxBytes: 4 }).app, mint(), "too many bytes");
+  assert.equal(r413.status, 413);
+  assert.equal(r413.text, "Upload too large or unreadable");
+});
+
+test("at now == exp the token is rejected; a present nonce counts as used even when expired", async () => {
+  const { store } = newStore();
+  const sessionId = await newSession(store, "kim");
+  const { token, payload } = mintUploadToken({ sessionId, pagePath: "Main.WebHome", filename: "f.bin", secret: SECRET });
+  const { app } = makeApp({ store });
+  await store.mutate((s) => { s.uploadNonces[payload.nonce] = 1; }); // expired entry, not yet pruned
+  assert.equal((await put(app, token)).status, 409);
+
+  const { token: t2, payload: p2 } = mintUploadToken({ sessionId, pagePath: "Main.WebHome", filename: "f.bin", secret: SECRET });
+  const realNow = Date.now;
+  Date.now = () => p2.exp;
+  try {
+    assert.equal((await put(app, t2)).status, 401);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("app level: PUT with Content-Type application/json and a >100 KB body is not eaten by the global parsers", async () => {
+  const { createApp } = await import("../src/app.js");
+  const { store } = newStore();
+  const sessionId = await newSession(store, "lena");
+  const { token } = mintUploadToken({ sessionId, pagePath: "Main.WebHome", filename: "f.bin", secret: SECRET });
+  const xwikiClient = { putAttachmentBytes: mock.fn(async () => "https://x/f.bin") };
+  const app = createApp({
+    sessionSecret: SECRET, mcpBaseUrl: "https://xwiki.example.com/mcp", store, xwikiClient,
+    xwikiTokens: {}, authentik: {}, authDebug: false, extraOrigins: [], extraRedirectUris: [],
+  });
+  const big = Buffer.alloc(200 * 1024, 97).toString();
+  const res = await request(app).put(`/mcp/uploads/${token}`).set("Content-Type", "application/json").send(big);
+  assert.equal(res.status, 201);
+  assert.equal(xwikiClient.putAttachmentBytes.mock.calls[0].arguments[2].length, big.length);
+});

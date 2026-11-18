@@ -62,10 +62,9 @@ export function createUploadRouter({ sessionSecret, xwikiClient, store, maxBytes
     // failure - the URL is one-time. A failed store write means nothing was reserved and
     // nothing is uploaded.
     try {
-      const now = Date.now();
       const used = await store.mutate((state) => {
-        const exp = state.uploadNonces[payload.nonce];
-        if (typeof exp === "number" && exp > now) return true;
+        // Any present nonce counts as used, expired or not (pruned by dailyReconcile).
+        if (payload.nonce in state.uploadNonces) return true;
         state.uploadNonces[payload.nonce] = payload.exp;
         return false;
       });
@@ -83,7 +82,8 @@ export function createUploadRouter({ sessionSecret, xwikiClient, store, maxBytes
     try {
       bytes = await readBodyWithLimit(req, maxBytes);
     } catch (e) {
-      return res.status(413).type("text/plain").send(e.message);
+      console.warn(`[upload] body rejected: ${e?.name || "Error"}`);
+      return res.status(413).type("text/plain").send("Upload too large or unreadable");
     }
 
     try {
@@ -100,7 +100,8 @@ export function createUploadRouter({ sessionSecret, xwikiClient, store, maxBytes
       if (e instanceof XWikiAuthError) {
         return res.status(401).type("text/plain").send("XWiki session expired. Please re-authenticate.");
       }
-      return res.status(502).type("text/plain").send(e.message);
+      console.warn(`[upload] XWiki upload failed: ${e?.name || "Error"}${e?.code ? ` ${e.code}` : ""}`);
+      return res.status(502).type("text/plain").send("Upload to XWiki failed");
     }
   });
 

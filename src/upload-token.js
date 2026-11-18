@@ -39,7 +39,7 @@ export function verifyUploadToken(token, secret) {
     throw new Error("Malformed upload token");
   }
 
-  if (!payload.exp || Date.now() > payload.exp) {
+  if (!payload.exp || Date.now() >= payload.exp) {
     throw new Error("Upload token expired");
   }
 
