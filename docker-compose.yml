@@ -38,6 +38,7 @@ services:
       - EXTRA_REDIRECT_URIS=${EXTRA_REDIRECT_URIS:-}
       - EXTRA_ORIGINS=${EXTRA_ORIGINS:-}
       - NODE_ENV=${NODE_ENV:-production}
+      - AUTH_DEBUG=${AUTH_DEBUG:-0}
       # Dev only — do NOT set to 0 in production
       # - NODE_TLS_REJECT_UNAUTHORIZED=0
     volumes:

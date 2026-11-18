@@ -537,7 +537,7 @@ function findFamily(state, hash) {
   return null;
 }
 
-// Maps Authentik errors: rejected → session ends; unavailable → 503 with nothing changed.
+// Maps Authentik errors: rejected → session ends; unavailable → 503 (MCP tokens unchanged).
 async function authentikStep(deps, sid, fn) {
   try {
     return await fn();
@@ -557,9 +557,12 @@ async function authentikStep(deps, sid, fn) {
 //
 // The rotation counts only once the final mutate has written. If that write fails, the
 // client gets an error and keeps the old token, which stays valid on the server too.
-// Known limitation: Authentik may already have rotated its refresh token at that point; the
-// server keeps the old Authentik token, and if Authentik invalidated it, the next refresh
-// ends the session with "authentik-rejected".
+// Authentik rotates its own refresh token on use, so the new one is written in a small
+// mutate right after authentik.refresh (before checkUser and the final write); a 503 from
+// checkUser or a failed final write then leaves the server with a usable Authentik token.
+// Remaining limitation: if that small write itself fails after Authentik rotated, the server
+// keeps the spent Authentik token and the next refresh ends the session with
+// "authentik-rejected".
 export async function refreshSession(deps, { refreshToken, clientId }) {
   const { store, authentik } = deps;
   if (typeof refreshToken !== "string" || !refreshToken) throw invalidGrant();
@@ -605,6 +608,14 @@ export async function refreshSession(deps, { refreshToken, clientId }) {
     // Step 4: Authentik refresh and group check.
     const oldAkRefresh = store.openField(session.authentikRefreshSealed, sealAad(sid, "authentikRefresh"));
     const ak = await authentikStep(deps, sid, () => authentik.refresh(oldAkRefresh));
+    // Secure Authentik's rotated token at once; nothing else changes (no MCP rotation,
+    // lastClientRefreshAt untouched). A failed write surfaces as 500 server_error.
+    const authentikRefreshSealed = store.sealField(ak.refreshToken, sealAad(sid, "authentikRefresh"));
+    await store.mutate((draft) => {
+      const s = draft.sessions[sid];
+      if (!s) throw invalidGrant();
+      s.authentikRefreshSealed = authentikRefreshSealed;
+    });
     await authentikStep(deps, sid, () => authentik.checkUser(ak.accessToken));
 
     // Step 5: XWiki token renewal (Task 10); never fails the refresh.
@@ -624,12 +635,10 @@ export async function refreshSession(deps, { refreshToken, clientId }) {
     const newToken = newRefreshToken();
     const response = await buildResponse(deps, session, newToken, now);
     const responseSealed = store.sealField(JSON.stringify(response), replayAad(familyId));
-    const authentikRefreshSealed = store.sealField(ak.refreshToken, sealAad(sid, "authentikRefresh"));
     await store.mutate((draft) => {
       const s = draft.sessions[sid];
       const f = draft.families[familyId];
       if (!s || !f || f.currentHash !== hash) throw invalidGrant();
-      s.authentikRefreshSealed = authentikRefreshSealed;
       s.lastClientRefreshAt = now;
       f.spentHashes = [...(f.spentHashes || []), hash].slice(-MAX_SPENT);
       f.currentHash = hashRefreshToken(newToken);

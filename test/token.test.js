@@ -420,3 +420,70 @@ test("Wiederholung genau bei now === replay.until -> Wiederverwendung, Sitzung b
   assert.deepEqual(res.body, { error: "invalid_grant" });
   assert.equal(onlySession(ctx), null);
 });
+
+// Authentik stub that rotates like the real one: a used refresh token is spent.
+function rotatingAuthentik(ctx) {
+  const valid = new Set(["AK-RT-0"]);
+  let n = 0;
+  ctx.opts.refresh = async (rt) => {
+    if (!valid.has(rt)) throw new AuthentikRejected();
+    valid.delete(rt);
+    n += 1;
+    valid.add(`AK-RT-R${n}`);
+    return { refreshToken: `AK-RT-R${n}`, accessToken: `AK-AT-R${n}` };
+  };
+}
+
+test("checkUser 503 nach Authentik-Rotation: neues Authentik-RT gesichert, Wiederholung gelingt", async () => {
+  const ctx = await setup();
+  const first = await login(ctx);
+  rotatingAuthentik(ctx);
+  ctx.opts.checkUser = async () => { throw new AuthentikUnavailable(); };
+  const before = onlySession(ctx);
+  const res = await refresh(ctx, first.refresh_token);
+  assert.equal(res.status, 503);
+  assert.deepEqual(res.body, { error: "temporarily_unavailable" });
+  const s = onlySession(ctx);
+  assert.equal(ctx.store.openField(s.authentikRefreshSealed, `session:${s.sid}:authentikRefresh`), "AK-RT-R1");
+  assert.equal(s.lastClientRefreshAt, before.lastClientRefreshAt, "no MCP rotation");
+  assert.equal(ctx.store.read().families[s.familyId].currentHash, hash(first.refresh_token));
+  delete ctx.opts.checkUser;
+  const retry = await refresh(ctx, first.refresh_token);
+  assert.equal(retry.status, 200, JSON.stringify(retry.body));
+  assert.deepEqual(ctx.calls.refresh, ["AK-RT-0", "AK-RT-R1"]);
+  assert.ok(onlySession(ctx), "session alive");
+});
+
+test("Schlussschreiben scheitert nach Authentik-Rotation: Wiederholung nach Neustart nutzt das neue Authentik-RT", async () => {
+  const ctx = await setup();
+  const first = await login(ctx);
+  rotatingAuthentik(ctx);
+  // Let the first write (Authentik RT) through, fail the second (rotation).
+  let writes = 0;
+  const realMutate = ctx.store.mutate.bind(ctx.store);
+  ctx.store.mutate = (fn) => {
+    writes += 1;
+    if (writes === 2) ctx.failWrites(true);
+    return realMutate(fn).finally(() => ctx.failWrites(false));
+  };
+  const res = await refresh(ctx, first.refresh_token);
+  assert.equal(res.status, 500);
+  const calls = { refresh: [], checkUser: [] };
+  const restarted = makeApp({ file: ctx.file, clock: ctx.clock, calls, opts: ctx.opts });
+  const r = await request(restarted.app).post("/token").type("form")
+    .send({ grant_type: "refresh_token", refresh_token: first.refresh_token, client_id: CID });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+});
+
+test("Sichern des Authentik-RT scheitert -> 500, MCP-Token unveraendert", async () => {
+  const ctx = await setup();
+  const first = await login(ctx);
+  const before = ctx.store.read();
+  ctx.failWrites(true);
+  const res = await refresh(ctx, first.refresh_token);
+  assert.equal(res.status, 500);
+  assert.deepEqual(res.body, { error: "server_error" });
+  assert.equal(ctx.calls.checkUser.length, 1, "checkUser not reached after the failed write");
+  ctx.failWrites(false);
+  assert.deepEqual(ctx.store.read(), before);
+});

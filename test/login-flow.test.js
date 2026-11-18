@@ -277,7 +277,7 @@ test("POST /mcp/oauth/consent ohne gueltiges CSRF -> 403", async () => {
   const ctx = await setup();
   const { res, cookie } = await toComplete(ctx);
   const { t, csrf } = consentFields(res.text);
-  for (const body of [{ t, action: "allow" }, { t, csrf: "x" + csrf.slice(1), action: "allow" }, { t, csrf: "", action: "allow" }]) {
+  for (const body of [{ t, action: "allow" }, { t, csrf: (csrf[0] === "x" ? "y" : "x") + csrf.slice(1), action: "allow" }, { t, csrf: "", action: "allow" }]) {
     const r = await request(ctx.app).post("/mcp/oauth/consent").type("form").set("Cookie", cookie).send(body);
     assert.equal(r.status, 403);
     assertFlowHeaders(r);

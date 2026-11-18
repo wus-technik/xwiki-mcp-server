@@ -163,6 +163,8 @@ Searches for articles in XWiki.
 **Example:**
 ```json
 {
+  "jsonrpc": "2.0",
+  "id": 1,
   "method": "tools/call",
   "params": {
     "name": "search_xwiki",
@@ -189,6 +191,8 @@ Gets the content of an XWiki page.
 **Example:**
 ```json
 {
+  "jsonrpc": "2.0",
+  "id": 1,
   "method": "tools/call",
   "params": {
     "name": "get_xwiki_page",
@@ -213,6 +217,8 @@ Creates or updates a page in XWiki.
 **Example:**
 ```json
 {
+  "jsonrpc": "2.0",
+  "id": 1,
   "method": "tools/call",
   "params": {
     "name": "create_xwiki_page",
