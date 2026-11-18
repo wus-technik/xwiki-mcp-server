@@ -1,14 +1,16 @@
 import { TOOLS, callTool } from "./tools.js";
 
 const SERVER_INFO = { name: "xwiki-mcp", version: "2.0.0" };
-// Newest first; the first entry is the fallback for unknown requested versions.
-export const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
+// Newest first. The order carries no meaning for negotiation: the fallback is explicit.
+export const SUPPORTED_PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+// Answered in `initialize` when the client requests a version we do not support.
+export const FALLBACK_PROTOCOL_VERSION = "2025-06-18";
 
 export async function handleMcpRequest(method, params, sessionCtx, xwikiClient, toolConfig = {}) {
   if (method === "initialize") {
     const requested = params?.protocolVersion;
     return {
-      protocolVersion: SUPPORTED_PROTOCOL_VERSIONS.includes(requested) ? requested : SUPPORTED_PROTOCOL_VERSIONS[0],
+      protocolVersion: SUPPORTED_PROTOCOL_VERSIONS.includes(requested) ? requested : FALLBACK_PROTOCOL_VERSION,
       serverInfo: SERVER_INFO,
       capabilities: { tools: {} },
     };

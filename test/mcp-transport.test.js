@@ -64,7 +64,7 @@ async function renew(store, sid, version, token) {
 // --- version negotiation ---------------------------------------------------------------
 
 test("initialize answers a supported requested version", async () => {
-  for (const v of ["2025-06-18", "2025-03-26", "2024-11-05"]) {
+  for (const v of ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]) {
     const r = await handleMcpRequest("initialize", { protocolVersion: v }, null, null);
     assert.equal(r.protocolVersion, v);
   }
@@ -134,12 +134,48 @@ test("bad Origin with a malformed body → 403 (checked before the body parser)"
   }
 });
 
-test("unsupported MCP-Protocol-Version with a malformed body → 400 version error (before the parser)", async () => {
+// --- version check sits behind the login (claude.ai connector check) ----------------------
+
+for (const v of ["2099-01-01", "2025-11-25"]) {
+  test(`POST /mcp without token and MCP-Protocol-Version ${v} → 401 with resource_metadata`, async () => {
+    const { app } = await setup();
+    const res = await request(app).post("/mcp").set("MCP-Protocol-Version", v)
+      .send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: v } });
+    assert.equal(res.status, 401);
+    assert.match(res.headers["www-authenticate"], /resource_metadata=/);
+  });
+}
+
+test("authenticated initialize with unknown header and protocolVersion → 200, negotiated 2025-06-18", async () => {
   const { app, token } = await setup();
   const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
-    .set("MCP-Protocol-Version", "1999-01-01").set("Content-Type", "application/json").send("{not json");
+    .set("MCP-Protocol-Version", "2099-01-01")
+    .send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2099-01-01" } });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.result.protocolVersion, "2025-06-18");
+});
+
+test("authenticated initialize with protocolVersion 2025-11-25 → 200, 2025-11-25", async () => {
+  const { app, token } = await setup();
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+    .send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.result.protocolVersion, "2025-11-25");
+});
+
+test("authenticated tools/list with unsupported header → 400 unsupported_protocol_version", async () => {
+  const { app, token } = await setup();
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+    .set("MCP-Protocol-Version", "2099-01-01").send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
   assert.equal(res.status, 400);
   assert.equal(res.body.error, "unsupported_protocol_version");
+});
+
+test("authenticated tools/list with 2025-11-25 header → 200", async () => {
+  const { app, token } = await setup();
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+    .set("MCP-Protocol-Version", "2025-11-25").send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  assert.equal(res.status, 200);
 });
 
 // --- JSON-RPC envelope -------------------------------------------------------------------
