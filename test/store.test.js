@@ -237,3 +237,44 @@ test('EEXIST retries are bounded', async () => {
   assert.ok(n >= 1 && n <= 10);
   assert.deepEqual(s.read().sessions, {});
 });
+
+function epermStub(times) {
+  const calls = { n: 0 };
+  const stub = { ...fs, renameSync: (...a) => { calls.n++; if (calls.n <= times) { const e = new Error('perm'); e.code = 'EPERM'; throw e; } return fs.renameSync(...a); } };
+  return { stub, calls };
+}
+
+test('win32: EPERM twice then success -> mutate resolves', async () => {
+  const file = tmpFile();
+  const { stub, calls } = epermStub(0);
+  const s = openStore({ file, key, fs: stub, platform: 'win32', sleep: () => {} });
+  calls.n = 0;
+  const e = epermStub(2);
+  const s2 = openStore({ file, key, fs: e.stub, platform: 'win32', sleep: () => {} });
+  await s2.mutate((d) => { d.sessions.a = {}; });
+  assert.deepEqual(s2.read().sessions, { a: {} });
+  assert.ok(e.calls.n >= 3);
+  assert.ok(s);
+});
+
+test('win32: EPERM always -> rejects, state unchanged, tmp removed, bounded', async () => {
+  const file = tmpFile();
+  let fail = false; let n = 0;
+  const stub = { ...fs, renameSync: (...a) => { if (!fail) return fs.renameSync(...a); n++; const e = new Error('perm'); e.code = 'EPERM'; throw e; } };
+  const s = openStore({ file, key, fs: stub, platform: 'win32', sleep: () => {} });
+  fail = true;
+  await assert.rejects(s.mutate((d) => { d.sessions.a = {}; }), /perm/);
+  assert.ok(n > 1 && n <= 10);
+  assert.deepEqual(s.read().sessions, {});
+  assert.deepEqual(fs.readdirSync(path.dirname(file)), ['store.json']);
+});
+
+test('linux: EPERM is not retried', async () => {
+  const file = tmpFile();
+  let fail = false; let n = 0;
+  const stub = { ...fs, renameSync: (...a) => { if (!fail) return fs.renameSync(...a); n++; const e = new Error('perm'); e.code = 'EPERM'; throw e; } };
+  const s = openStore({ file, key, fs: stub, platform: 'linux', sleep: () => {} });
+  fail = true;
+  await assert.rejects(s.mutate((d) => { d.sessions.a = {}; }), /perm/);
+  assert.equal(n, 1);
+});

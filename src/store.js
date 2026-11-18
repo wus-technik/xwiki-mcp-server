@@ -19,7 +19,14 @@ function emptyState() {
 const COLLECTIONS = ['clients', 'grants', 'sessions', 'families', 'cleanups', 'uploadNonces'];
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
-export function openStore({ file, key, fs = nodeFs, platform = process.platform }) {
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+const RENAME_ATTEMPTS = 10;
+
+function defaultSleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+export function openStore({ file, key, fs = nodeFs, platform = process.platform, sleep = defaultSleep }) {
   function openTmp() {
     const dir = path.dirname(file);
     for (let i = 0; i < 5; i++) {
@@ -52,6 +59,18 @@ export function openStore({ file, key, fs = nodeFs, platform = process.platform 
     }
   }
 
+  function renameWithRetry(from, to) {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        fs.renameSync(from, to);
+        return;
+      } catch (err) {
+        if (platform !== 'win32' || !err || !RENAME_RETRY_CODES.has(err.code) || attempt >= RENAME_ATTEMPTS) throw err;
+        sleep(Math.min(10 * attempt, 50));
+      }
+    }
+  }
+
   function write(serializedState) {
     const buf = Buffer.from(`{"check":${JSON.stringify(seal('ok', key, CHECK_AAD))},"state":${serializedState}}`, 'utf8');
     let tmp;
@@ -64,7 +83,7 @@ export function openStore({ file, key, fs = nodeFs, platform = process.platform 
       } finally {
         fs.closeSync(fd);
       }
-      fs.renameSync(tmp, file);
+      renameWithRetry(tmp, file);
     } catch (err) {
       if (tmp) { try { fs.rmSync(tmp, { force: true }); } catch { /* ignore */ } }
       throw err;
