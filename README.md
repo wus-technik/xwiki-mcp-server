@@ -53,24 +53,24 @@ git clone https://github.com/alfredfs85/xwiki-mcp-server.git
 cd xwiki-mcp-server
 ```
 
-2. Generate the two secrets (32 random bytes each) and store them in the password manager:
+2. Generate the two secrets (32 random bytes each, base64) and store them in the password manager:
 ```bash
-openssl rand -base64 32   # SESSION_SECRET
-openssl rand -base64 32   # TOKEN_ENC_KEY
+openssl rand -base64 32   # value for SESSION_SECRET
+openssl rand -base64 32   # value for TOKEN_ENC_KEY
 ```
 
-3. Provide the environment variables (see [Environment Variables](#-environment-variables)) in the shell or stack definition that runs Compose:
-```bash
-XWIKI_URL=http://your-xwiki-internal-host:8080
-XWIKI_PUBLIC_URL=https://your-domain.com
-AUTHENTIK_ISSUER=https://your-authentik-instance.com
-AUTHENTIK_APP_SLUG=xwiki-mcp
-OAUTH_CLIENT_ID=your_client_id
-OAUTH_CLIENT_SECRET=your_client_secret
-OAUTH_REDIRECT_URI=https://your-domain.com/mcp/oauth/callback
-MCP_BASE_URL=https://your-domain.com/mcp
-SESSION_SECRET=<32 random bytes, base64>
-TOKEN_ENC_KEY=<32 random bytes, base64>
+3. Create a `.env` file next to `docker-compose.yml` (it is listed in `.gitignore`; Compose reads it automatically to fill the `${…}` variables). Replace every `REPLACE-…` value (see [Environment Variables](#-environment-variables)):
+```dotenv
+XWIKI_URL="http://REPLACE-xwiki-internal-host:8080"
+XWIKI_PUBLIC_URL="https://REPLACE-your-domain.example"
+AUTHENTIK_ISSUER="https://REPLACE-your-authentik.example"
+AUTHENTIK_APP_SLUG="xwiki-mcp"
+OAUTH_CLIENT_ID="REPLACE-client-id"
+OAUTH_CLIENT_SECRET="REPLACE-client-secret"
+OAUTH_REDIRECT_URI="https://REPLACE-your-domain.example/mcp/oauth/callback"
+MCP_BASE_URL="https://REPLACE-your-domain.example/mcp"
+SESSION_SECRET="REPLACE-output-of-openssl-rand-base64-32"
+TOKEN_ENC_KEY="REPLACE-output-of-openssl-rand-base64-32"
 ```
 `docker-compose.yml` sets `STORE_FILE=/data/store.json` on the `./data` volume.
 
@@ -238,7 +238,7 @@ Creates or updates a page in XWiki.
 | `OAUTH_CLIENT_ID` | Authentik OAuth2 client ID | yes | - |
 | `OAUTH_CLIENT_SECRET` | Authentik OAuth2 client secret | yes | - |
 | `OAUTH_REDIRECT_URI` | Callback URL registered in Authentik, `<MCP_BASE_URL>/oauth/callback` | yes | - |
-| `MCP_BASE_URL` | Public base URL of the MCP server; issuer and resource in the OAuth metadata | yes | `http://localhost:<PORT>` |
+| `MCP_BASE_URL` | Public base URL of the MCP server; issuer and resource in the OAuth metadata. Not checked at start, but must be set to the public URL for any real deployment | in production | `http://localhost:<PORT>` |
 | `SESSION_SECRET` | Signs the access tokens (HS256); at least 32 bytes. The server does not start without it | yes | - |
 | `TOKEN_ENC_KEY` | Encrypts the secrets in the store file; exactly 32 bytes, standard base64. The server does not start without it | yes | - |
 | `STORE_FILE` | Path of the persistent store (clients, consents, sessions, refresh token families, pending cleanups) | yes | - (Compose: `/data/store.json`) |
@@ -247,13 +247,14 @@ Creates or updates a page in XWiki.
 | `EXTRA_ORIGINS` | Additional allowed `Origin` values for `POST /mcp` besides claude.ai, claude.com, chatgpt.com and the origin of `MCP_BASE_URL` | no | empty |
 | `AUTH_DEBUG` | `1` logs auth events (event name, shortened session id, user, client name; never tokens or cookies) | no | off |
 | `NODE_ENV` | `production` refuses `NODE_TLS_REJECT_UNAUTHORIZED=0` | no | `development` |
+| `NODE_TLS_REJECT_UNAUTHORIZED` | `0` disables TLS certificate checks (development only, e.g. self-signed certificates); the server refuses to start with it under `NODE_ENV=production` | no | unset |
 
 > **The store file is unusable without its key.** Back up `TOKEN_ENC_KEY` (and `SESSION_SECRET`) in the password manager. With a wrong or missing key the server does not start.
 
 ## 📝 Security Notes
 
 - ⚠️ **Never** commit credentials to the repository
-- ⚠️ The store file holds the XWiki consent tokens and Authentik refresh tokens encrypted with `TOKEN_ENC_KEY` (AES-256-GCM); refresh tokens of the MCP clients are stored only as SHA-256 hashes. Browser cookies are never stored.
+- ⚠️ The store file holds the XWiki consent tokens and Authentik refresh tokens encrypted with `TOKEN_ENC_KEY` (AES-256-GCM); refresh tokens of the MCP clients are looked up by their SHA-256 hash, the plain token is not kept for that. The response of the latest rotation (including the new refresh token) is also stored, encrypted with `TOKEN_ENC_KEY`, so that a repeated request within 30 seconds gets the same answer. Browser cookies are never stored.
 - ⚠️ No token, cookie or refresh token is written to the log
 - ⚠️ `NODE_TLS_REJECT_UNAUTHORIZED=0` is for development only and refused with `NODE_ENV=production`
 - ⚠️ The `.env` file is in `.gitignore` for security

@@ -17,8 +17,8 @@ import { fakeAuthentik } from "./helpers/fake-authentik.js";
 const BASE = "https://xwiki.example.com/mcp";
 const ORIGIN = new URL(BASE).origin;
 const CLIENT_CB = "https://claude.ai/api/mcp/auth_callback";
-const USERNAME = "zurman.o";
-const XWIKI_USER = "xwiki:XWiki.zurmano";
+const USERNAME = "max.mustermann";
+const XWIKI_USER = "xwiki:XWiki.maxmustermann";
 const PAGES = [
   { space: "Main", pageName: "Handbuch", title: "Handbuch MCP", content: "# Handbuch\n\nVerbinden mit XWiki." },
 ];

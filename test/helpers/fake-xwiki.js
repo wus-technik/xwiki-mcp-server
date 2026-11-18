@@ -164,7 +164,7 @@ ${entriesHtml(user, formToken)}</div>`;
   return {
     url,
     requests,
-    // The browser is logged in at the SSO as this XWiki user (e.g. "xwiki:XWiki.zurmano").
+    // The browser is logged in at the SSO as this XWiki user (e.g. "xwiki:XWiki.maxmustermann").
     ssoLogin(user) {
       ssoUser = user;
     },

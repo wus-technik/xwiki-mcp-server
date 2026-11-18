@@ -14,7 +14,7 @@ import { createXWikiClient, XWikiAuthError } from "../src/xwiki-client.js";
 
 const SECRET = "test-secret-32-chars-minimum-pad";
 const KEY = Buffer.alloc(32, 7);
-const BEARER = "zurmano/1/secret1";
+const BEARER = "maxmustermann/1/secret1";
 
 function tmpFile() {
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "upload-")), "s.json");

@@ -73,7 +73,7 @@ function safeEqual(a, b) {
 }
 
 // Mapping Authentik → XWiki (test/fixtures/xwiki-18.7.0/README.md): preferred_username
-// without dots, lower-cased, e.g. "zurman.o" → "xwiki:XWiki.zurmano".
+// without dots, lower-cased, e.g. "max.mustermann" → "xwiki:XWiki.maxmustermann".
 export function expectedXWikiUser(username) {
   return `xwiki:XWiki.${String(username).replace(/\./g, "").toLowerCase()}`;
 }

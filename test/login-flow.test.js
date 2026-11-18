@@ -15,7 +15,7 @@ const SECRET = "test-secret-32-chars-minimum-pad";
 const BASE = "https://xwiki.example.com/mcp";
 const DAY = 86400000;
 const T0 = Date.UTC(2026, 10, 18, 9, 0, 0);
-const USER = "xwiki:XWiki.zurmano";
+const USER = "xwiki:XWiki.maxmustermann";
 const CID = "client-1";
 const CID_LOCAL = "client-local";
 const CLAUDE_CB = "https://claude.ai/api/mcp/auth_callback";
@@ -42,7 +42,7 @@ async function setup(opts = {}) {
     authorizeUrl: ({ state, nonce }) => `https://auth.example.com/application/o/authorize/?state=${state}&nonce=${nonce}`,
     exchangeCode: async (code, nonce) => {
       calls.exchange.push({ code, nonce });
-      return { sub: "sub-1", username: "zurman.o", refreshToken: "AK-REFRESH-SECRET", accessToken: "AK-ACCESS-SECRET" };
+      return { sub: "sub-1", username: "max.mustermann", refreshToken: "AK-REFRESH-SECRET", accessToken: "AK-ACCESS-SECRET" };
     },
     checkUser: async (at) => {
       calls.checkUser.push(at);
@@ -263,7 +263,7 @@ test("Complete ohne Zustimmung -> Zustimmungsseite mit CSRF-Feld, escaped", asyn
   assert.match(res.text, /Claude &lt;b&gt;/);
   assert.ok(!res.text.includes("Claude <b>"));
   assert.match(res.text, /https:\/\/claude\.ai/);
-  assert.match(res.text, /zurmano/);
+  assert.match(res.text, /maxmustermann/);
   assert.match(res.text, /action="\/mcp\/oauth\/consent"/);
   assert.ok(consentFields(res.text).csrf);
   assert.match(res.text, /Zulassen/);
@@ -498,12 +498,12 @@ test("createSession schreibt Sitzung und Familie in einem mutate und entfernt pe
   const counted = { ...store, mutate: (fn) => { mutates += 1; return store.mutate(fn); } };
   const { sid, familyId } = await createSession(
     { store: counted, cfg: {}, now: () => T0 },
-    { sub: "s", userId: "zurman.o", xwikiUser: USER, clientId: CID, authentikRefresh: "rt", xwikiToken: "tok", consentId: "c1", tokenExpiresAt: T0 + DAY, pendingCleanupId: "p1" },
+    { sub: "s", userId: "max.mustermann", xwikiUser: USER, clientId: CID, authentikRefresh: "rt", xwikiToken: "tok", consentId: "c1", tokenExpiresAt: T0 + DAY, pendingCleanupId: "p1" },
   );
   assert.equal(mutates, 1);
   const st = store.read();
   assert.equal(st.sessions[sid].familyId, familyId);
-  assert.equal(st.sessions[sid].userId, "zurman.o");
+  assert.equal(st.sessions[sid].userId, "max.mustermann");
   assert.equal(st.sessions[sid].consentId, "c1");
   assert.equal(st.sessions[sid].createdAt, T0);
   assert.equal(st.families[familyId].sid, sid);

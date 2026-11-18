@@ -17,7 +17,7 @@ const SECRET = "test-secret-32-chars-minimum-pad";
 const BASE = "https://xwiki.example.com/mcp";
 const DAY = 86400000;
 const T0 = Date.UTC(2026, 10, 18, 9, 0, 0);
-const USER = "xwiki:XWiki.zurmano";
+const USER = "xwiki:XWiki.maxmustermann";
 const CID = "client-1";
 const CID2 = "client-2";
 const CB = "https://claude.ai/api/mcp/auth_callback";
@@ -30,7 +30,7 @@ function makeApp({ file, fsImpl, clock, opts = {}, calls }) {
   let akN = 0;
   const authentik = {
     authorizeUrl: ({ state, nonce }) => `https://auth.example.com/application/o/authorize/?state=${state}&nonce=${nonce}`,
-    exchangeCode: async () => ({ sub: "sub-1", username: "zurman.o", refreshToken: "AK-RT-0", accessToken: "AK-AT-0" }),
+    exchangeCode: async () => ({ sub: "sub-1", username: "max.mustermann", refreshToken: "AK-RT-0", accessToken: "AK-AT-0" }),
     checkUser: async (at) => {
       calls.checkUser.push(at);
       if (opts.checkUser) await opts.checkUser(at);

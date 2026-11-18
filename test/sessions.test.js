@@ -24,7 +24,7 @@ const BASE = "https://xwiki.example.com/mcp";
 const DAY = 86400000;
 const MIN = 60000;
 const T0 = Date.UTC(2026, 10, 18, 9, 0, 0);
-const USER = "xwiki:XWiki.zurmano";
+const USER = "xwiki:XWiki.maxmustermann";
 const OTHER = "xwiki:XWiki.other";
 const CID = "client-1";
 const CB = "https://claude.ai/api/mcp/auth_callback";
@@ -83,7 +83,7 @@ async function seedClient(store, clientId = CID, extra = {}) {
 async function newSession(ctx, { n = 1, user = USER, clientId = CID, issue = true, tokenExpiresAt } = {}) {
   if (!ctx.store.read().clients[clientId]) await seedClient(ctx.store, clientId);
   const { sid, familyId } = await createSession(ctx.deps, {
-    sub: "sub-1", userId: "zurman.o", xwikiUser: user, clientId, authentikRefresh: "AK-RT-0",
+    sub: "sub-1", userId: "max.mustermann", xwikiUser: user, clientId, authentikRefresh: "AK-RT-0",
     xwikiToken: bearerOf(n, user), consentId: consent(n, user), tokenExpiresAt: tokenExpiresAt ?? ctx.clock.now + 90 * DAY,
   });
   const tokens = issue ? await issueTokens(ctx.deps, { sid, familyId, clientId }) : null;
@@ -200,7 +200,7 @@ test("Eintraege aelter als 7 Tage -> console.warn mit id, xwikiUser, reason, ohn
   const all = out.lines.join("\n");
   const warn = out.lines.find((l) => l.includes(id));
   assert.ok(warn, all);
-  assert.match(warn, /xwiki:XWiki\.zurmano/);
+  assert.match(warn, /xwiki:XWiki\.maxmustermann/);
   assert.match(warn, /idle/);
   assert.ok(!all.includes("secret1"), "no token in logs");
 });

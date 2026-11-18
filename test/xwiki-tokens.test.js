@@ -11,9 +11,9 @@ import {
 const FIX = new URL("./fixtures/xwiki-18.7.0/", import.meta.url);
 const FORM_TOKEN = "TESTFORMTOKEN+abc/123==";
 const COOKIE = "JSESSIONID=SECRETCOOKIE123";
-const USER = "xwiki:XWiki.foellmann";
+const USER = "xwiki:XWiki.mmuster";
 const BASE = "https://xwiki.example.com";
-const PAGE_URL = `${BASE}/bin/view/XWiki/foellmann?category=userapplications`;
+const PAGE_URL = `${BASE}/bin/view/XWiki/mmuster?category=userapplications`;
 
 const rawCreated = readFileSync(new URL("created.html", FIX), "utf8");
 const rawList = readFileSync(new URL("list.html", FIX), "utf8");
@@ -170,7 +170,7 @@ test("createToken: Antwort ohne Token oder falscher Titel -> unexpected_page", a
 });
 
 test("createToken: Benutzer im Token weicht ab -> identity_mismatch", async () => {
-  const created = CREATED.replace("Bearer xwiki:XWiki.foellmann/6/", "Bearer xwiki:XWiki.other/6/");
+  const created = CREATED.replace("Bearer xwiki:XWiki.mmuster/6/", "Bearer xwiki:XWiki.other/6/");
   const { api } = mk(happyHandler({ created }));
   await assert.rejects(api.createToken({ cookie: COOKIE }, req), (e) => e.code === "identity_mismatch");
 });
@@ -282,7 +282,7 @@ test("findTokensByPrefix filtert nach Namenspraefix", async () => {
 
 test("Fehler enthalten nie Token, Cookie oder form_token", async () => {
   const handlers = [
-    happyHandler({ created: CREATED.replace("Bearer xwiki:XWiki.foellmann/6/", "Bearer xwiki:XWiki.other/6/") }),
+    happyHandler({ created: CREATED.replace("Bearer xwiki:XWiki.mmuster/6/", "Bearer xwiki:XWiki.other/6/") }),
     (url, init) =>
       init.method === "POST"
         ? new Response(null, { status: 302, headers: { Location: `/login?c=${COOKIE}` } })
@@ -341,7 +341,7 @@ test("parseConsentList: unbekannter Eintragsaufbau wirft statt Eintraege zu verl
 
 test("parseCreatedToken: Token ausserhalb des Erfolgskastens zaehlt nicht", () => {
   const h = rawCreated.replace('<div class="code">Bearer', '<div class="codex">Bearer')
-    .replace("</form>", '</form><div class="code">Bearer xwiki:XWiki.foellmann/9/ZZZ</div>');
+    .replace("</form>", '</form><div class="code">Bearer xwiki:XWiki.mmuster/9/ZZZ</div>');
   assert.equal(parseCreatedToken(h), null);
 });
 
