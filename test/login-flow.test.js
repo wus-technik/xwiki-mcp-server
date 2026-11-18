@@ -294,6 +294,7 @@ test("Zustimmung erteilt -> Code, Grant, Sitzung; zweiter Login ohne Zustimmungs
   const loc = new URL(res.headers.location);
   assert.equal(loc.origin + loc.pathname, CLAUDE_CB);
   assert.equal(loc.searchParams.get("state"), "client-state");
+  assert.equal(loc.searchParams.get("iss"), BASE, "RFC 9207 iss on the first-consent redirect");
   const code = loc.searchParams.get("code");
   assert.ok(code);
 
@@ -333,6 +334,7 @@ test("Zustimmung erteilt -> Code, Grant, Sitzung; zweiter Login ohne Zustimmungs
   const second = await toComplete(ctx);
   assert.equal(second.res.status, 302);
   assert.ok(new URL(second.res.headers.location).searchParams.get("code"));
+  assert.equal(new URL(second.res.headers.location).searchParams.get("iss"), BASE, "RFC 9207 iss on the success redirect");
   assert.equal(Object.keys(ctx.store.read().sessions).length, 2);
 });
 
@@ -362,6 +364,7 @@ test("Abbrechen -> access_denied an redirect_uri, kein Grant, keine Sitzung", as
   const loc = new URL(res.headers.location);
   assert.equal(loc.searchParams.get("error"), "access_denied");
   assert.equal(loc.searchParams.get("state"), "client-state");
+  assert.equal(loc.searchParams.get("iss"), BASE, "RFC 9207 iss on the error redirect");
   assert.equal(loc.searchParams.get("code"), null);
   assert.deepEqual(ctx.store.read().grants, {});
   assert.deepEqual(ctx.store.read().sessions, {});
@@ -645,4 +648,27 @@ test("sweep entfernt abgelaufene Eintraege ohne Zugriff", async () => {
   ctx.clock.now += 10 * 60 * 1000 + 1;
   ctx.app.locals.oauth.sweep();
   assert.deepEqual(ctx.app.locals.oauth.stats(), { flows: 0, pendings: 0, codes: 0 });
+});
+
+test("Autorisierungsfehler von Authentik -> access_denied mit iss (RFC 9207)", async () => {
+  const ctx = await setup();
+  const a = await request(ctx.app).get("/authorize").query(authorizeQuery());
+  const flow = flowCookie(a);
+  const state = new URL(a.headers.location).searchParams.get("state");
+  const cb = await request(ctx.app).get("/mcp/oauth/callback").query({ error: "access_denied", state }).set("Cookie", flow);
+  assert.equal(cb.status, 302);
+  const loc = new URL(cb.headers.location);
+  assert.equal(loc.searchParams.get("error"), "access_denied");
+  assert.equal(loc.searchParams.get("iss"), BASE);
+  assert.equal(loc.searchParams.get("state"), "client-state");
+});
+
+test("authorize mit reserviertem Parameter in redirect_uri -> Fehlerseite, kein Redirect", async () => {
+  const ctx = await setup();
+  await ctx.store.mutate((s) => {
+    s.clients["c-res"] = { clientId: "c-res", clientName: "X", redirectUris: ["http://localhost:3123/cb?a=1&iss=x"], createdAt: 1, lastUsedAt: 1 };
+  });
+  const r = await request(ctx.app).get("/authorize").query(authorizeQuery({ client_id: "c-res", redirect_uri: "http://localhost:3123/cb?a=1&iss=x" }));
+  assert.equal(r.status, 400);
+  assert.equal(r.headers.location, undefined);
 });

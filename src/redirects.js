@@ -8,6 +8,8 @@ const FIXED_REDIRECTS = [
 const FIXED_ORIGINS = ["https://claude.ai", "https://claude.com", "https://chatgpt.com"];
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1"]);
 
+const RESERVED_RESPONSE_PARAMS = new Set(["code", "state", "iss", "error", "error_description", "error_uri"]);
+
 // Parse a redirect URI strictly; returns a URL or null.
 function parseRedirect(raw) {
   if (typeof raw !== "string" || raw.length === 0 || raw.length > 2048) return null;
@@ -16,6 +18,10 @@ function parseRedirect(raw) {
   try { u = new URL(raw); } catch { return null; }
   if (u.protocol !== "http:" && u.protocol !== "https:") return null;
   if (u.hash || raw.includes("#")) return null;
+  // The authorization response appends these to the redirect URI; they must not pre-exist.
+  for (const k of u.searchParams.keys()) {
+    if (RESERVED_RESPONSE_PARAMS.has(k.toLowerCase())) return null;
+  }
   if (u.username || u.password) return null;
   const authority = raw.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").split(/[/?#]/)[0];
   if (authority.includes("@")) return null;
@@ -34,10 +40,15 @@ function loopbackParts(raw) {
   return m ? { host: m[1], rest: m[3] } : null;
 }
 
+// ChatGPT connectors without RFC 9207 support use a per-connector callback path. Exact shape:
+// https://chatgpt.com/connector/oauth/{id}, no port, userinfo, query or fragment.
+const CHATGPT_CALLBACK = /^https:\/\/chatgpt\.com\/connector\/oauth\/[A-Za-z0-9_-]{1,128}$/;
+
 export function isAllowedRedirect(uri, extra = []) {
   if (!parseRedirect(uri)) return false;
   if (loopbackParts(uri)) return true;
   if (FIXED_REDIRECTS.includes(uri)) return true;
+  if (CHATGPT_CALLBACK.test(uri)) return true;
   return extra.includes(uri);
 }
 

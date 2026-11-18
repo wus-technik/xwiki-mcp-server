@@ -64,7 +64,7 @@ async function renew(store, sid, version, token) {
 // --- version negotiation ---------------------------------------------------------------
 
 test("initialize answers a supported requested version", async () => {
-  for (const v of ["2025-06-18", "2025-03-26", "2024-11-05"]) {
+  for (const v of ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]) {
     const r = await handleMcpRequest("initialize", { protocolVersion: v }, null, null);
     assert.equal(r.protocolVersion, v);
   }
@@ -134,12 +134,48 @@ test("bad Origin with a malformed body → 403 (checked before the body parser)"
   }
 });
 
-test("unsupported MCP-Protocol-Version with a malformed body → 400 version error (before the parser)", async () => {
+// --- version check sits behind the login (claude.ai connector check) ----------------------
+
+for (const v of ["2099-01-01", "2025-11-25"]) {
+  test(`POST /mcp without token and MCP-Protocol-Version ${v} → 401 with resource_metadata`, async () => {
+    const { app } = await setup();
+    const res = await request(app).post("/mcp").set("MCP-Protocol-Version", v)
+      .send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: v } });
+    assert.equal(res.status, 401);
+    assert.match(res.headers["www-authenticate"], /resource_metadata=/);
+  });
+}
+
+test("authenticated initialize with unknown header and protocolVersion → 200, negotiated 2025-06-18", async () => {
   const { app, token } = await setup();
   const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
-    .set("MCP-Protocol-Version", "1999-01-01").set("Content-Type", "application/json").send("{not json");
+    .set("MCP-Protocol-Version", "2099-01-01")
+    .send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2099-01-01" } });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.result.protocolVersion, "2025-06-18");
+});
+
+test("authenticated initialize with protocolVersion 2025-11-25 → 200, 2025-11-25", async () => {
+  const { app, token } = await setup();
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+    .send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.result.protocolVersion, "2025-11-25");
+});
+
+test("authenticated tools/list with unsupported header → 400 unsupported_protocol_version", async () => {
+  const { app, token } = await setup();
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+    .set("MCP-Protocol-Version", "2099-01-01").send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
   assert.equal(res.status, 400);
   assert.equal(res.body.error, "unsupported_protocol_version");
+});
+
+test("authenticated tools/list with 2025-11-25 header → 200", async () => {
+  const { app, token } = await setup();
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+    .set("MCP-Protocol-Version", "2025-11-25").send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  assert.equal(res.status, 200);
 });
 
 // --- JSON-RPC envelope -------------------------------------------------------------------
@@ -325,3 +361,70 @@ test("advertised /mcp/oauth/{authorize,token,register,revoke} routes exist", asy
     assert.notEqual(res.status, 405, `${m.toUpperCase()} ${p}`);
   }
 });
+
+// --- auth before parser, Origin on every method ----------------------------------------------
+
+test("no token + malformed JSON → 401 with resource_metadata (auth before the parser)", async () => {
+  const { app } = await setup();
+  for (const p of ["/mcp", "/mcp/"]) {
+    const res = await request(app).post(p).set("Content-Type", "application/json").send("{not json");
+    assert.equal(res.status, 401, p);
+    assert.match(res.headers["www-authenticate"], /resource_metadata=/);
+  }
+});
+
+test("valid token + malformed JSON → 400 invalid_request", async () => {
+  const { app, token } = await setup();
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+    .set("Content-Type", "application/json").send("{not json");
+  assert.equal(res.status, 400);
+  assert.equal(res.body.error, "invalid_request");
+});
+
+for (const method of ["get", "delete"]) {
+  for (const p of ["/mcp", "/mcp/"]) {
+    test(`${method.toUpperCase()} ${p} with a bad Origin → 403, without Origin → 405 Allow: POST`, async () => {
+      const { app } = await setup();
+      const bad = await request(app)[method](p).set("Origin", "https://evil.example");
+      assert.equal(bad.status, 403);
+      assert.equal(bad.body.error, "forbidden_origin");
+      const ok = await request(app)[method](p);
+      assert.equal(ok.status, 405);
+      assert.equal(ok.headers.allow, "POST");
+    });
+  }
+}
+
+// --- non-canonical /mcp paths are not served --------------------------------------------------
+
+for (const p of ["/mcp//", "/MCP", "/Mcp/", "//mcp", "/mcp//oauth/token", "/MCP/oauth/authorize"]) {
+  test(`non-canonical ${p} → 404 not_found, whatever Origin/token/body`, async () => {
+    const { app, token } = await setup();
+    const plain = await request(app).post(p).set("Content-Type", "application/json").send("{not json");
+    assert.equal(plain.status, 404);
+    assert.equal(plain.body.error, "not_found");
+    const evil = await request(app).post(p).set("Origin", "https://evil.example").send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    assert.equal(evil.status, 404);
+    const authed = await request(app).post(p).set("Authorization", `Bearer ${token}`).send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    assert.equal(authed.status, 404);
+    assert.equal((await request(app).get(p)).status, 404);
+  });
+}
+
+test("canonical /mcp paths still work", async () => {
+  const { app, token } = await setup();
+  for (const p of ["/mcp", "/mcp/"]) {
+    const r = await request(app).post(p).set("Authorization", `Bearer ${token}`).send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    assert.equal(r.status, 200, p);
+  }
+  assert.equal((await request(app).get("/mcp/health")).status, 200);
+  assert.equal((await request(app).get("/mcp/.well-known/oauth-protected-resource")).status, 200);
+});
+
+for (const method of ["head", "options"]) {
+  test(`${method.toUpperCase()} /mcp with a foreign Origin → 403`, async () => {
+    const { app } = await setup();
+    const res = await request(app)[method]("/mcp").set("Origin", "https://evil.example");
+    assert.equal(res.status, 403);
+  });
+}
