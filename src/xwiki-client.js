@@ -279,50 +279,63 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch, s
   }
 
   // Per line: true if it belongs to a code block, where "# comment" or "= x =" lines are code,
-  // not headings. Covers fenced Markdown blocks (``` / ~~~, closed by the same character at
-  // least as long), XWiki code macros ({{code ...}} ... {{/code}}) and verbatim {{{ ... }}}.
-  // A macro opened and closed on the same line opens no block.
-  function codeLineMask(lines) {
+  // not headings. Which block kinds apply depends on the page syntax:
+  //  - fenced blocks (``` / ~~~) only in Markdown (and unknown syntax). A backtick fence's
+  //    info string must not contain a backtick (CommonMark), so ```x``` is inline code.
+  //    Closed by a bare fence of the same character, at least as long.
+  //  - XWiki code macros {{code ...}} ... {{/code}} in every syntax (XWiki Markdown 1.2
+  //    supports macros too); an opener may follow prose, {{/code}} may sit mid-line, and a
+  //    self-closing {{code .../}} opens nothing.
+  //  - verbatim {{{ ... }}} in XWiki syntax (and unknown syntax), not in Markdown.
+  function codeLineMask(lines, syntax) {
+    const s = typeof syntax === "string" ? syntax.toLowerCase() : "";
+    const markdown = s.startsWith("markdown");
+    const xwiki = s.startsWith("xwiki");
+    const fences = !xwiki;
+    const verbatim = !markdown;
+    const MACRO_TOKENS = /\{\{\{|\}\}\}|\{\{code(?:\s[^}]*?)?(\/)?\}\}|\{\{\/code\}\}/g;
     const mask = [];
-    let open = null; // { kind: "fence", char, len } | { kind: "macro" } | { kind: "verbatim" }
+    let fence = null; // { char, len } while inside a fenced block
+    let block = null; // "macro" | "verbatim" while inside an XWiki block
     for (const line of lines) {
-      if (open) {
-        mask.push(true);
-        if (open.kind === "fence") {
-          const close = line.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
-          if (close && close[1][0] === open.char && close[1].length >= open.len) open = null;
-        } else if (open.kind === "macro") {
-          if (line.includes("{{/code}}")) open = null;
-        } else if (line.includes("}}}")) {
-          open = null;
-        }
-        continue;
-      }
-      const fence = line.match(/^ {0,3}(`{3,}|~{3,})/);
       if (fence) {
-        open = { kind: "fence", char: fence[1][0], len: fence[1].length };
         mask.push(true);
+        const close = line.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+        if (close && close[1][0] === fence.char && close[1].length >= fence.len) fence = null;
         continue;
       }
-      const trimmed = line.trimStart();
-      if (/^\{\{code(\s|\}\})/.test(trimmed)) {
-        if (!trimmed.includes("{{/code}}")) open = { kind: "macro" };
-        mask.push(true);
-        continue;
+      if (!block && fences) {
+        const open = line.match(/^ {0,3}(?:(`{3,})[^`]*|(~{3,}).*)$/);
+        if (open) {
+          const run = open[1] || open[2];
+          fence = { char: run[0], len: run.length };
+          mask.push(true);
+          continue;
+        }
       }
-      if (trimmed.startsWith("{{{")) {
-        if (!trimmed.slice(3).includes("}}}")) open = { kind: "verbatim" };
-        mask.push(true);
-        continue;
+      let inCode = block !== null;
+      for (const m of line.matchAll(MACRO_TOKENS)) {
+        const token = m[0];
+        if (block === "macro") {
+          if (token === "{{/code}}") block = null;
+        } else if (block === "verbatim") {
+          if (token === "}}}") block = null;
+        } else if (token.startsWith("{{code") && !m[1]) {
+          block = "macro";
+          inCode = true;
+        } else if (token === "{{{" && verbatim) {
+          block = "verbatim";
+          inCode = true;
+        }
       }
-      mask.push(false);
+      mask.push(inCode);
     }
     return mask;
   }
 
-  function extractHeadings(content) {
+  function extractHeadings(content, syntax) {
     const lines = String(content || "").split("\n");
-    const inCode = codeLineMask(lines);
+    const inCode = codeLineMask(lines, syntax);
     const occurrences = new Map();
     const headings = [];
 
@@ -361,7 +374,7 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch, s
       : 1;
     const normalizedRequestedHeading = normalizeHeadingName(requestedHeading);
     const lines = String(content || "").split("\n");
-    const inCode = codeLineMask(lines);
+    const inCode = codeLineMask(lines, options.syntax);
     const headings = [];
     let cursor = 0;
 
@@ -539,7 +552,7 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch, s
         const page = await fetchPageRecord(pagePath, sessionCtx);
         return {
           ...result,
-          headings: extractHeadings(page.content),
+          headings: extractHeadings(page.content, page.syntax),
         };
       }));
     },
@@ -547,7 +560,7 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch, s
     async getPage(pagePath, optionsOrSessionCtx = {}, maybeSessionCtx = {}) {
       const { options, sessionCtx } = resolveGetPageArgs(optionsOrSessionCtx, maybeSessionCtx);
       const page = await fetchPageRecord(pagePath, sessionCtx);
-      const section = extractSectionByHeading(page.content, options);
+      const section = extractSectionByHeading(page.content, { ...options, syntax: page.syntax });
       return {
         title: page.title,
         author: page.author,

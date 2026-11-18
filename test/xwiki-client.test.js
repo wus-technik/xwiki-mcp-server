@@ -834,3 +834,59 @@ for (const [label, content] of [["XWiki", XWIKI_CODE_PAGE], ["Markdown", MARKDOW
     await assert.rejects(() => client.getPage("IT.WebHome", { heading: "auf docker101" }, SESSION), /Heading not found/);
   });
 }
+
+// --- code block detection: self-closing macros, openers after prose, inline code, syntax ------
+
+function syntaxClient(content, syntax) {
+  const fetcher = mock.fn(async (url) => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    json: async () => (url.includes("/search?")
+      ? { searchResults: [{ title: "Doc", pageName: "WebHome", space: "IT", pageFullName: "IT.WebHome" }] }
+      : { title: "Doc", content, author: "alice", modified: "2024-01-01", ...(syntax ? { syntax } : {}) }),
+  }));
+  return createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+}
+const headingTitles = async (content, syntax) =>
+  (await syntaxClient(content, syntax).search("doc", 5, { includeHeadings: true }, SESSION))[0].headings.map((h) => h.title);
+
+for (const syntax of ["xwiki/2.1", "markdown/1.2", undefined]) {
+  test(`self-closing {{code .../}} opens no block (${syntax || "no syntax"})`, async () => {
+    const content = ["= Before =", "{{code language=\"bash\" source=\"string:echo x\"/}}", "= Later =", "text"].join("\n");
+    assert.deepEqual(await headingTitles(content, syntax), ["Before", "Later"]);
+  });
+
+  test(`{{code}} opened after prose and {{/code}} closing mid-line (${syntax || "no syntax"})`, async () => {
+    const content = [
+      "= Before =",
+      "Run: {{code language=\"bash\"}}",
+      "= inside =",
+      "# auf docker101",
+      "echo done {{/code}} and more prose",
+      "= After =",
+    ].join("\n");
+    assert.deepEqual(await headingTitles(content, syntax), ["Before", "After"]);
+  });
+}
+
+for (const syntax of ["markdown/1.2", undefined]) {
+  test(`\`\`\`inline\`\`\` code span on its own line is not a fence (${syntax || "no syntax"})`, async () => {
+    const content = ["# Before", "```example```", "# Real", "text", "~~~ info with ` backtick", "# in tilde fence", "~~~", "# End"].join("\n");
+    assert.deepEqual(await headingTitles(content, syntax), ["Before", "Real", "End"]);
+  });
+}
+
+test("xwiki/2.1 page: a bare ``` line is no fence, later = … = headings stay", async () => {
+  const content = ["= One =", "```", "= Two =", "text", "= Three ="].join("\n");
+  assert.deepEqual(await headingTitles(content, "xwiki/2.1"), ["One", "Two", "Three"]);
+  const page = await syntaxClient(content, "xwiki/2.1").getPage("IT.WebHome", { heading: "Two" }, SESSION);
+  assert.equal(page.content, "= Two =\ntext");
+});
+
+test("markdown/1.2 page: ``` fence still hides # comments; section extraction uses the syntax", async () => {
+  const content = ["# One", "```", "# comment", "```", "# Two", "text"].join("\n");
+  assert.deepEqual(await headingTitles(content, "markdown/1.2"), ["One", "Two"]);
+  const page = await syntaxClient(content, "markdown/1.2").getPage("IT.WebHome", { heading: "One" }, SESSION);
+  assert.ok(page.content.includes("# comment"));
+});
