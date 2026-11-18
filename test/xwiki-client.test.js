@@ -769,3 +769,68 @@ test("search returns at most limit results after dedupe", async () => {
   const results = await client.search("p", 2, SESSION);
   assert.deepEqual(results.map((r) => r.title), ["P1", "P2"]);
 });
+
+// --- headings inside code blocks ------------------------------------------------------------
+
+function pageClient(content) {
+  const fetcher = mock.fn(async (url) => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    json: async () => (url.includes("/search?")
+      ? { searchResults: [{ title: "Doc", pageName: "WebHome", space: "IT", pageFullName: "IT.WebHome" }] }
+      : { title: "Doc", content, author: "alice", modified: "2024-01-01" }),
+  }));
+  return createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+}
+
+const XWIKI_CODE_PAGE = [
+  "= Setup =",
+  "Run this:",
+  "{{code language=\"bash\"}}",
+  "# auf docker101",
+  "= not a heading =",
+  "{{/code}}",
+  "{{{",
+  "== verbatim ==",
+  "}}}",
+  "{{code}}# inline{{/code}}",
+  "= Next =",
+  "done",
+].join("\n");
+
+const MARKDOWN_CODE_PAGE = [
+  "# Setup",
+  "```bash",
+  "# auf docker101",
+  "```",
+  "~~~",
+  "## tilde comment",
+  "~~~",
+  "````",
+  "```",
+  "# still code",
+  "````",
+  "# Next",
+  "done",
+].join("\n");
+
+test("headings inside XWiki {{code}} and {{{ }}} blocks are ignored", async () => {
+  const [r] = await pageClient(XWIKI_CODE_PAGE).search("doc", 5, { includeHeadings: true }, SESSION);
+  assert.deepEqual(r.headings.map((h) => h.title), ["Setup", "Next"]);
+});
+
+test("headings inside fenced Markdown code blocks (``` and ~~~) are ignored", async () => {
+  const [r] = await pageClient(MARKDOWN_CODE_PAGE).search("doc", 5, { includeHeadings: true }, SESSION);
+  assert.deepEqual(r.headings.map((h) => h.title), ["Setup", "Next"]);
+});
+
+for (const [label, content] of [["XWiki", XWIKI_CODE_PAGE], ["Markdown", MARKDOWN_CODE_PAGE]]) {
+  test(`section extraction (${label}) runs across code blocks and cannot target a code comment`, async () => {
+    const client = pageClient(content);
+    const page = await client.getPage("IT.WebHome", { heading: "Setup" }, SESSION);
+    assert.ok(page.content.includes("# auf docker101"), "code block belongs to the section");
+    assert.ok(!page.content.includes("Next"), "section ends at the next real heading");
+    await assert.rejects(() => client.getPage("IT.WebHome", { heading: "auf docker101" }, SESSION), /Heading not found/);
+  });
+}

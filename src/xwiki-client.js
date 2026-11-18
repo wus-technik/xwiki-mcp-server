@@ -278,12 +278,56 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch, s
     return null;
   }
 
+  // Per line: true if it belongs to a code block, where "# comment" or "= x =" lines are code,
+  // not headings. Covers fenced Markdown blocks (``` / ~~~, closed by the same character at
+  // least as long), XWiki code macros ({{code ...}} ... {{/code}}) and verbatim {{{ ... }}}.
+  // A macro opened and closed on the same line opens no block.
+  function codeLineMask(lines) {
+    const mask = [];
+    let open = null; // { kind: "fence", char, len } | { kind: "macro" } | { kind: "verbatim" }
+    for (const line of lines) {
+      if (open) {
+        mask.push(true);
+        if (open.kind === "fence") {
+          const close = line.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+          if (close && close[1][0] === open.char && close[1].length >= open.len) open = null;
+        } else if (open.kind === "macro") {
+          if (line.includes("{{/code}}")) open = null;
+        } else if (line.includes("}}}")) {
+          open = null;
+        }
+        continue;
+      }
+      const fence = line.match(/^ {0,3}(`{3,}|~{3,})/);
+      if (fence) {
+        open = { kind: "fence", char: fence[1][0], len: fence[1].length };
+        mask.push(true);
+        continue;
+      }
+      const trimmed = line.trimStart();
+      if (/^\{\{code(\s|\}\})/.test(trimmed)) {
+        if (!trimmed.includes("{{/code}}")) open = { kind: "macro" };
+        mask.push(true);
+        continue;
+      }
+      if (trimmed.startsWith("{{{")) {
+        if (!trimmed.slice(3).includes("}}}")) open = { kind: "verbatim" };
+        mask.push(true);
+        continue;
+      }
+      mask.push(false);
+    }
+    return mask;
+  }
+
   function extractHeadings(content) {
     const lines = String(content || "").split("\n");
+    const inCode = codeLineMask(lines);
     const occurrences = new Map();
     const headings = [];
 
-    for (const line of lines) {
+    for (const [i, line] of lines.entries()) {
+      if (inCode[i]) continue;
       const parsedHeading = parseHeadingLine(line);
       if (!parsedHeading) continue;
       const normalizedTitle = normalizeHeadingName(parsedHeading.title);
@@ -317,11 +361,12 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch, s
       : 1;
     const normalizedRequestedHeading = normalizeHeadingName(requestedHeading);
     const lines = String(content || "").split("\n");
+    const inCode = codeLineMask(lines);
     const headings = [];
     let cursor = 0;
 
-    for (const line of lines) {
-      const parsedHeading = parseHeadingLine(line);
+    for (const [i, line] of lines.entries()) {
+      const parsedHeading = inCode[i] ? null : parseHeadingLine(line);
       if (parsedHeading) {
         headings.push({
           ...parsedHeading,
