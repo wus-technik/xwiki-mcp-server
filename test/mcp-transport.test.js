@@ -428,3 +428,30 @@ for (const method of ["head", "options"]) {
     assert.equal(res.status, 403);
   });
 }
+
+// --- tools/call result shape ---------------------------------------------------------------
+
+test("tools/call result carries structuredContent next to the text block", async () => {
+  const { app, token } = await setup({ search: () => [{ title: "A", space: "Main", url: "https://x/A" }] });
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`).send(searchCall);
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.result.structuredContent, { results: [{ title: "A", space: "Main", url: "https://x/A" }] });
+  assert.deepEqual(JSON.parse(res.body.result.content[0].text), [{ title: "A", space: "Main", url: "https://x/A" }]);
+  assert.equal(res.body.result.isError, undefined);
+});
+
+test("tools/call tool failure → result with isError: true", async () => {
+  const { app, token } = await setup({ search: () => { throw new Error("boom"); } });
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`).send(searchCall);
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.result, { content: [{ type: "text", text: "Error: boom" }], isError: true });
+});
+
+test("tools/list exposes title, annotations and outputSchema", async () => {
+  const { app, token } = await setup();
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`).send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  const get = res.body.result.tools.find((t) => t.name === "get_xwiki_page");
+  assert.equal(get.annotations.readOnlyHint, true);
+  assert.equal(get.outputSchema.type, "object");
+  assert.ok(get.title);
+});

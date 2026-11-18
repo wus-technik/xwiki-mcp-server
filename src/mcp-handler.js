@@ -20,8 +20,7 @@ export async function handleMcpRequest(method, params, sessionCtx, xwikiClient, 
   }
   if (method === "tools/call") {
     const { name, arguments: args } = params || {};
-    const text = await callTool(name, args || {}, sessionCtx, xwikiClient, toolConfig);
-    return { content: [{ type: "text", text }] };
+    return callTool(name, args || {}, sessionCtx, xwikiClient, toolConfig);
   }
   if (method === "notifications/initialized") {
     return null;
