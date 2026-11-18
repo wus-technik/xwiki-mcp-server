@@ -1,6 +1,5 @@
 import { createApp } from "./src/app.js";
 import { loadConfig, validateConfig } from "./src/config.js";
-import { configureSessionPersistence } from "./src/session-store.js";
 import { openStore } from "./src/store.js";
 import { startBackground } from "./src/sessions.js";
 
@@ -19,10 +18,6 @@ try {
   console.error(`[store] cannot open STORE_FILE ${cfg.storeFile}: ${e.message}`);
   process.exit(1);
 }
-
-// Legacy session store stays memory-only (STORE_FILE belongs to the encrypted store);
-// removed together with the legacy store in a later task.
-configureSessionPersistence();
 
 const app = createApp({ ...cfg, store });
 // Daily reconcile with Authentik (first run after 5 min) and hourly XWiki token cleanups.

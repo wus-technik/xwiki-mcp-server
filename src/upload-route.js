@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { verifyUploadToken } from "./upload-token.js";
-import { getSession, isUploadNonceConsumed, markUploadNonceConsumed } from "./session-store.js";
+import { sessionCtxFrom } from "./auth-middleware.js";
 import { XWikiAuthError } from "./xwiki-client.js";
 
 // Separate, higher cap than the source_url fetch path's MAX_SOURCE_URL_BYTES (50MB, in
@@ -46,7 +46,7 @@ function readBodyWithLimit(req, maxBytes) {
 // Plain HTTP route for the presigned-upload-URL flow (not behind the OAuth bearer
 // middleware — a bare `curl -T` can't send a Bearer token). Auth is the signed,
 // single-use token itself plus the session it was minted for.
-export function createUploadRouter({ sessionSecret, xwikiClient, maxBytes = MAX_UPLOAD_ROUTE_BYTES }) {
+export function createUploadRouter({ sessionSecret, xwikiClient, store, maxBytes = MAX_UPLOAD_ROUTE_BYTES }) {
   const router = Router();
 
   router.put("/uploads/:token", async (req, res) => {
@@ -57,12 +57,25 @@ export function createUploadRouter({ sessionSecret, xwikiClient, maxBytes = MAX_
       return res.status(401).type("text/plain").send(e.message);
     }
 
-    if (isUploadNonceConsumed(payload.nonce)) {
-      return res.status(409).type("text/plain").send("Upload token already used");
+    // Reserve the nonce first, in ONE mutate (mutate runs sequentially, so check-and-set is
+    // atomic: of two parallel PUTs exactly one wins). The nonce stays consumed on any later
+    // failure - the URL is one-time. A failed store write means nothing was reserved and
+    // nothing is uploaded.
+    try {
+      const now = Date.now();
+      const used = await store.mutate((state) => {
+        const exp = state.uploadNonces[payload.nonce];
+        if (typeof exp === "number" && exp > now) return true;
+        state.uploadNonces[payload.nonce] = payload.exp;
+        return false;
+      });
+      if (used) return res.status(409).type("text/plain").send("Upload token already used");
+    } catch {
+      return res.status(503).type("text/plain").send("Upload temporarily unavailable");
     }
 
-    const session = getSession(payload.sid);
-    if (!session) {
+    const sessionCtx = sessionCtxFrom(store, payload.sid, store.read().sessions[payload.sid]);
+    if (!sessionCtx) {
       return res.status(401).type("text/plain").send("Session expired or not found");
     }
 
@@ -79,11 +92,11 @@ export function createUploadRouter({ sessionSecret, xwikiClient, maxBytes = MAX_
         payload.filename,
         bytes,
         payload.contentType,
-        { xwikiCookie: session.xwikiCookie },
+        sessionCtx,
       );
-      markUploadNonceConsumed(payload.nonce, payload.exp);
       return res.status(201).type("text/plain").send(downloadUrl);
     } catch (e) {
+      // The session is deliberately NOT ended here: the /mcp path owns that decision.
       if (e instanceof XWikiAuthError) {
         return res.status(401).type("text/plain").send("XWiki session expired. Please re-authenticate.");
       }

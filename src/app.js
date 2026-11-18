@@ -168,7 +168,7 @@ export function createApp(overrides = {}) {
 
   // Not wrapped with authMiddleware: a bare `curl -T` can't send a Bearer token.
   // The signed, single-use token in the URL path is the auth.
-  mcpRouter.use(createUploadRouter({ sessionSecret: cfg.sessionSecret, xwikiClient }));
+  mcpRouter.use(createUploadRouter({ sessionSecret: cfg.sessionSecret, xwikiClient, store: cfg.store }));
 
   mcpRouter.get("/health", (_req, res) => {
     res.json({ status: "ok", xwiki: cfg.xwikiUrl ? "configured" : "not configured" });
