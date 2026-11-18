@@ -244,3 +244,19 @@ test("app level: PUT with Content-Type application/json and a >100 KB body is no
   assert.equal(res.status, 201);
   assert.equal(xwikiClient.putAttachmentBytes.mock.calls[0].arguments[2].length, big.length);
 });
+
+test("app level: PUT /mcp/UPLOADS/<token> (other case) with application/json is not eaten by the parsers either", async () => {
+  const { createApp } = await import("../src/app.js");
+  const { store } = newStore();
+  const sessionId = await newSession(store, "mia");
+  const { token } = mintUploadToken({ sessionId, pagePath: "Main.WebHome", filename: "f.bin", secret: SECRET });
+  const xwikiClient = { putAttachmentBytes: mock.fn(async () => "https://x/f.bin") };
+  const app = createApp({
+    sessionSecret: SECRET, mcpBaseUrl: "https://xwiki.example.com/mcp", store, xwikiClient,
+    xwikiTokens: {}, authentik: {}, authDebug: false, extraOrigins: [], extraRedirectUris: [],
+  });
+  const big = Buffer.alloc(200 * 1024, 97).toString();
+  const res = await request(app).put(`/mcp/UPLOADS/${token}`).set("Content-Type", "application/json").send(big);
+  assert.equal(res.status, 201);
+  assert.equal(xwikiClient.putAttachmentBytes.mock.calls[0].arguments[2].length, big.length);
+});

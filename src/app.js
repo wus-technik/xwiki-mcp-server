@@ -71,7 +71,7 @@ export function createApp(overrides = {}) {
   // Upload PUTs stream a raw body: the global parsers must not touch them.
   // POST /mcp parses its JSON body itself, behind the login (auth before parser).
   const notUpload = (mw) => (req, res, next) => (
-    (req.method === "PUT" && req.path.startsWith("/mcp/uploads/")) || (req.method === "POST" && (req.path === "/mcp" || req.path === "/mcp/"))
+    (req.method === "PUT" && /^\/mcp\/uploads\//i.test(req.path)) || (req.method === "POST" && (req.path === "/mcp" || req.path === "/mcp/"))
       ? next() : mw(req, res, next));
   app.use(notUpload(express.json()));
   app.use(notUpload(express.urlencoded({ extended: false })));
