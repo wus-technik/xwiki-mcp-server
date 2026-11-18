@@ -38,6 +38,8 @@ export function asMetadata(cfg) {
     token_endpoint_auth_methods_supported: ["none"],
     revocation_endpoint_auth_methods_supported: ["none"],
     scopes_supported: ["xwiki"],
+    // RFC 9207: every authorization response redirect carries iss=<issuer>.
+    authorization_response_iss_parameter_supported: true,
   };
 }
 
@@ -52,7 +54,7 @@ const quoted = (v) => String(v).replace(/[\r\n]/g, "").replace(/[\\"]/g, (c) => 
 
 export function sendUnauthorized(res, cfg, { error, description } = {}) {
   const base = cfg.mcpBaseUrl;
-  let header = `Bearer realm="${base}", resource_metadata="${base}/.well-known/oauth-protected-resource"`;
+  let header = `Bearer realm="${base}", resource_metadata="${base}/.well-known/oauth-protected-resource", scope="xwiki"`;
   if (error) header += `, error="${quoted(error)}"`;
   if (description) header += `, error_description="${quoted(description)}"`;
   res.setHeader("WWW-Authenticate", header);

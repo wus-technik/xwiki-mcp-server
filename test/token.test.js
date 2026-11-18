@@ -205,6 +205,7 @@ test("Refresh liefert neues Paar; altes Token in 30 s gleiche Antwort, nach 31 s
   const r1 = await refresh(ctx, first.refresh_token, CID, "/mcp/oauth/token");
   assert.equal(r1.status, 200, JSON.stringify(r1.body));
   assertNoStore(r1);
+  assert.equal(r1.body.scope, "xwiki");
   assert.notEqual(r1.body.refresh_token, first.refresh_token);
   assert.notEqual(r1.body.access_token, first.access_token);
   assert.deepEqual(ctx.calls.refresh, ["AK-RT-0"]);

@@ -126,3 +126,30 @@ test("mutate failure gives 500 without client_id", async () => {
   assert.equal(res.body.client_id, undefined);
   assert.equal(res.body.error, "server_error");
 });
+
+test("DCR accepts the ChatGPT connector/oauth/{id} redirect URI", async () => {
+  const { app } = mk();
+  const uri = "https://chatgpt.com/connector/oauth/abc_DEF-123";
+  const res = await request(app).post("/register").send({ client_name: "ChatGPT", redirect_uris: [uri] });
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  assert.deepEqual(res.body.redirect_uris, [uri]);
+});
+
+for (const uri of [
+  "https://chatgpt.com/connector/oauth/",
+  "https://chatgpt.com/connector/oauth",
+  "https://chatgpt.com/connector/oauth/a/b",
+  "https://chatgpt.com.evil.example/connector/oauth/x",
+  "https://chatgpt.com:8443/connector/oauth/x",
+  "https://chatgpt.com/connector/oauth/x?a=1",
+  "https://chatgpt.com/connector/oauth/x#f",
+  "http://chatgpt.com/connector/oauth/x",
+  "https://chatgpt.com/connector/oauth/x%2Fy",
+]) {
+  test(`DCR rejects ${uri}`, async () => {
+    const { app } = mk();
+    const res = await request(app).post("/register").send({ redirect_uris: [uri] });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, "invalid_redirect_uri");
+  });
+}

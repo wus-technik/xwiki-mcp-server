@@ -56,6 +56,7 @@ test("AS metadata endpoints and capabilities", () => {
   assert.deepEqual(m.token_endpoint_auth_methods_supported, ["none"]);
   assert.deepEqual(m.revocation_endpoint_auth_methods_supported, ["none"]);
   assert.deepEqual(m.scopes_supported, ["xwiki"]);
+  assert.equal(m.authorization_response_iss_parameter_supported, true);
   assert.deepEqual(resourceMetadata(cfg).resource, base);
 });
 
@@ -63,7 +64,8 @@ test("sendUnauthorized sets challenge with error and escaped description", async
   const res = await request(makeApp()).get("/unauth");
   assert.equal(res.status, 401);
   const h = res.headers["www-authenticate"];
-  assert.ok(h.startsWith(`Bearer realm="${base}", resource_metadata="${base}/.well-known/oauth-protected-resource"`));
+  assert.ok(h.startsWith(`Bearer realm="${base}", resource_metadata="${base}/.well-known/oauth-protected-resource", scope="xwiki"`));
+  assert.ok(h.includes(', scope="xwiki"'));
   assert.ok(h.includes(', error="invalid_token"'));
   assert.ok(h.includes(', error_description="bad \\"x\\"\\\\yz"'));
   assert.equal(res.body.error, "invalid_token");
@@ -72,7 +74,7 @@ test("sendUnauthorized sets challenge with error and escaped description", async
 test("sendUnauthorized without args", async () => {
   const res = await request(makeApp()).get("/unauth-bare");
   assert.equal(res.status, 401);
-  assert.equal(res.headers["www-authenticate"], `Bearer realm="${base}", resource_metadata="${base}/.well-known/oauth-protected-resource"`);
+  assert.equal(res.headers["www-authenticate"], `Bearer realm="${base}", resource_metadata="${base}/.well-known/oauth-protected-resource", scope="xwiki"`);
   assert.deepEqual(res.body, { error: "unauthorized" });
 });
 

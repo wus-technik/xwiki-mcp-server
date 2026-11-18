@@ -34,10 +34,15 @@ function loopbackParts(raw) {
   return m ? { host: m[1], rest: m[3] } : null;
 }
 
+// ChatGPT connectors without RFC 9207 support use a per-connector callback path. Exact shape:
+// https://chatgpt.com/connector/oauth/{id}, no port, userinfo, query or fragment.
+const CHATGPT_CALLBACK = /^https:\/\/chatgpt\.com\/connector\/oauth\/[A-Za-z0-9_-]{1,128}$/;
+
 export function isAllowedRedirect(uri, extra = []) {
   if (!parseRedirect(uri)) return false;
   if (loopbackParts(uri)) return true;
   if (FIXED_REDIRECTS.includes(uri)) return true;
+  if (CHATGPT_CALLBACK.test(uri)) return true;
   return extra.includes(uri);
 }
 

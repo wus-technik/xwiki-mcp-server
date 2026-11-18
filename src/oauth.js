@@ -111,10 +111,12 @@ export function sendError(res, status, message, code) {
   res.status(status).type("html").send(htmlPage("Anmeldung nicht möglich", `<p>${esc(message)}</p>${detail}`));
 }
 
-function redirectToClient(res, flow, params) {
+// Authorization response redirect; `iss` is the RFC 9207 issuer (= metadata issuer).
+function redirectToClient(res, flow, params, issuer) {
   const u = new URL(flow.redirectUri);
   for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v);
   u.searchParams.set("state", flow.clientState);
+  u.searchParams.set("iss", issuer);
   flowHeaders(res);
   res.redirect(302, u.toString());
 }
@@ -260,7 +262,7 @@ export function createOAuthHandlers(cfg, deps = {}) {
     if (!flowCookieMatches(req, flow)) {
       return sendError(res, 400, "Die Anmeldung wurde in einem anderen Browser begonnen. Bitte im Programm erneut verbinden.", "invalid_request");
     }
-    if (req.query.error !== undefined) return redirectToClient(res, flow, { error: "access_denied" });
+    if (req.query.error !== undefined) return redirectToClient(res, flow, { error: "access_denied" }, mcpBaseUrl);
     const code = str(req.query.code);
     if (!code) return sendError(res, 400, "Authentik hat keinen Anmeldecode geliefert.", "invalid_request");
 
@@ -389,7 +391,7 @@ export function createOAuthHandlers(cfg, deps = {}) {
       });
       log("login_complete", { sid: session.sid.slice(0, 8), user: xwikiUser, client: client.clientName });
       clearFlowCookie(res);
-      redirectToClient(res, flow, { code });
+      redirectToClient(res, flow, { code }, mcpBaseUrl);
     });
   }
 
@@ -443,7 +445,7 @@ export function createOAuthHandlers(cfg, deps = {}) {
     if (action === "deny") {
       log("consent_denied", {});
       clearFlowCookie(res);
-      return redirectToClient(res, pending.flow, { error: "access_denied" });
+      return redirectToClient(res, pending.flow, { error: "access_denied" }, mcpBaseUrl);
     }
     const cookie = xwikiCookieOf(req);
     const xwikiUser = await verifyIdentity(res, t, pending, cookie);
