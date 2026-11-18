@@ -70,12 +70,14 @@ test("initialize answers a supported requested version", async () => {
   }
 });
 
-test("initialize with an unknown or missing version answers 2025-06-18", async () => {
-  assert.equal((await handleMcpRequest("initialize", { protocolVersion: "1999-01-01" }, null, null)).protocolVersion, "2025-06-18");
-  assert.equal((await handleMcpRequest("initialize", undefined, null, null)).protocolVersion, "2025-06-18");
+test("initialize with an unknown or missing version answers the newest supported (2025-11-25)", async () => {
+  for (const v of ["1999-01-01", "2026-07-28", "garbage"]) {
+    assert.equal((await handleMcpRequest("initialize", { protocolVersion: v }, null, null)).protocolVersion, "2025-11-25", v);
+  }
+  assert.equal((await handleMcpRequest("initialize", undefined, null, null)).protocolVersion, "2025-11-25");
 });
 
-test("POST /mcp initialize with 2025-03-26 → 2025-03-26, with 1999-01-01 → 2025-06-18", async () => {
+test("POST /mcp initialize with 2025-03-26 → 2025-03-26, with 1999-01-01 → 2025-11-25", async () => {
   const { app, token } = await setup();
   const a = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
     .send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26" } });
@@ -83,7 +85,7 @@ test("POST /mcp initialize with 2025-03-26 → 2025-03-26, with 1999-01-01 → 2
   assert.equal(a.body.result.protocolVersion, "2025-03-26");
   const b = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
     .send({ jsonrpc: "2.0", id: 2, method: "initialize", params: { protocolVersion: "1999-01-01" } });
-  assert.equal(b.body.result.protocolVersion, "2025-06-18");
+  assert.equal(b.body.result.protocolVersion, "2025-11-25");
 });
 
 test("MCP-Protocol-Version header unsupported → 400; supported → 200", async () => {
@@ -146,13 +148,13 @@ for (const v of ["2099-01-01", "2025-11-25"]) {
   });
 }
 
-test("authenticated initialize with unknown header and protocolVersion → 200, negotiated 2025-06-18", async () => {
+test("authenticated initialize with unknown header and protocolVersion → 200, negotiated 2025-11-25", async () => {
   const { app, token } = await setup();
   const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
     .set("MCP-Protocol-Version", "2099-01-01")
     .send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2099-01-01" } });
   assert.equal(res.status, 200);
-  assert.equal(res.body.result.protocolVersion, "2025-06-18");
+  assert.equal(res.body.result.protocolVersion, "2025-11-25");
 });
 
 test("authenticated initialize with protocolVersion 2025-11-25 → 200, 2025-11-25", async () => {
@@ -163,13 +165,30 @@ test("authenticated initialize with protocolVersion 2025-11-25 → 200, 2025-11-
   assert.equal(res.body.result.protocolVersion, "2025-11-25");
 });
 
-test("authenticated tools/list with unsupported header → 400 unsupported_protocol_version", async () => {
-  const { app, token } = await setup();
-  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
-    .set("MCP-Protocol-Version", "2099-01-01").send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
-  assert.equal(res.status, 400);
-  assert.equal(res.body.error, "unsupported_protocol_version");
-});
+for (const v of ["2025-01-01", "2024-10-07", "1999-01-01", "latest", "2026-7-28", "2026-07-28x", "20260728"]) {
+  test(`authenticated tools/list with unknown older or malformed header '${v}' → 400 unsupported_protocol_version`, async () => {
+    const { app, token } = await setup();
+    const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+      .set("MCP-Protocol-Version", v).send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, "unsupported_protocol_version");
+  });
+}
+
+// claude.ai and openai-mcp/1.0.0 send a newer version than we know on follow-up requests.
+for (const v of ["2026-07-28", "2099-01-01"]) {
+  test(`authenticated tools/list and tools/call with newer header ${v} → 200 (treated as newest)`, async () => {
+    const { app, token } = await setup({ search: () => [] });
+    const list = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+      .set("MCP-Protocol-Version", v).send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    assert.equal(list.status, 200);
+    assert.ok(list.body.result.tools.length > 0);
+    const call = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+      .set("MCP-Protocol-Version", v).send(searchCall);
+    assert.equal(call.status, 200);
+    assert.deepEqual(call.body.result.structuredContent, { results: [] });
+  });
+}
 
 test("authenticated tools/list with 2025-11-25 header → 200", async () => {
   const { app, token } = await setup();

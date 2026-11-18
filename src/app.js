@@ -9,7 +9,7 @@ import { createAuthentik } from "./authentik.js";
 import { createXWikiTokens } from "./xwiki-tokens.js";
 import { createXWikiClient, XWikiAuthError } from "./xwiki-client.js";
 import { createUploadRouter } from "./upload-route.js";
-import { handleMcpRequest, SUPPORTED_PROTOCOL_VERSIONS } from "./mcp-handler.js";
+import { handleMcpRequest, SUPPORTED_PROTOCOL_VERSIONS, isAcceptedProtocolVersionHeader } from "./mcp-handler.js";
 import { sendUnauthorized } from "./metadata.js";
 import { isAllowedOrigin } from "./redirects.js";
 import { endSession } from "./sessions.js";
@@ -56,10 +56,11 @@ export function createApp(overrides = {}) {
     next();
   };
   // After auth: a present but unsupported MCP-Protocol-Version header is refused with 400,
-  // except for `initialize`, which negotiates the version in its body.
+  // except for `initialize`, which negotiates the version in its body. A well-formed date
+  // version newer than our newest is tolerated (see isAcceptedProtocolVersionHeader).
   const versionGuard = (req, res, next) => {
     const version = req.headers["mcp-protocol-version"];
-    if (version !== undefined && !SUPPORTED_PROTOCOL_VERSIONS.includes(version) && req.body?.method !== "initialize") {
+    if (version !== undefined && !isAcceptedProtocolVersionHeader(version) && req.body?.method !== "initialize") {
       authDebugLogger.warn("protocol_version_rejected", req, { protocolVersion: /^[\w.-]{1,32}$/.test(version) ? version : "<invalid>" });
       return res.status(400).json({ error: "unsupported_protocol_version", supported: SUPPORTED_PROTOCOL_VERSIONS });
     }
