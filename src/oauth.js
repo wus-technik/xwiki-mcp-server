@@ -140,7 +140,7 @@ export function createOAuthHandlers(cfg, deps = {}) {
   const { authentik, xwikiTokens } = deps;
   const now = deps.now || Date.now;
   const logger = deps.logger || createAuthDebugLogger(cfg.authDebug);
-  const sessionDeps = { store, cfg, authentik, xwikiTokens, now };
+  const sessionDeps = { store, cfg, authentik, xwikiTokens, now, logger };
 
   const flows = ttlMap(now, STATE_TTL, MAX_FLOWS); // serverState → flow
   const pendings = ttlMap(now, PENDING_TTL); // pendingId → { flow, sub, username, authentikRefresh }
@@ -517,7 +517,8 @@ export function createOAuthHandlers(cfg, deps = {}) {
       return res.json(response);
     } catch (e) {
       if (e instanceof TokenError) {
-        log("token_failed", { error: e.code });
+        // Refresh failures are already logged as refresh_rejected (with reason) by refreshSession.
+        if (grantType === "authorization_code") log("token_failed", { error: e.code });
         return tokenError(res, e.status, e.code);
       }
       console.error(`[token] failed: ${e?.code || e?.name || "error"}`);

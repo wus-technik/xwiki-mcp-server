@@ -149,6 +149,29 @@ export function createApp(overrides = {}) {
     }
   };
 
+  // AUTH_DEBUG: one tool_call line per tools/call. Only names, lengths and the outcome
+  // (ok / tool_error / xwiki_auth / exception class) — never argument values or result text.
+  const logToolCall = (req, params, startedAt, outcome, result) => {
+    const name = params?.name;
+    let argsLength = 0;
+    try {
+      argsLength = JSON.stringify(params?.arguments ?? {}).length;
+    } catch {
+      argsLength = -1;
+    }
+    const resultLength = Array.isArray(result?.content)
+      ? result.content.reduce((n, c) => n + (typeof c?.text === "string" ? c.text.length : 0), 0)
+      : 0;
+    authDebugLogger.info("tool_call", req, {
+      tool: typeof name === "string" && /^[\w.-]{1,64}$/.test(name) ? name : "<invalid>",
+      argsLength,
+      resultLength,
+      durationMs: Date.now() - startedAt,
+      outcome,
+      sid: String(req.mcpSession?.sessionId || "").slice(0, 8),
+    });
+  };
+
   const mcpRouter = express.Router();
 
   mcpRouter.use(createOAuthRouter(h));
@@ -171,11 +194,18 @@ export function createApp(overrides = {}) {
     const { method, params, id } = body;
     const toolConfig = { sessionSecret: cfg.sessionSecret, mcpBaseUrl: cfg.mcpBaseUrl };
 
+    const isToolCall = method === "tools/call";
+    const startedAt = Date.now();
     let outcome;
     try {
       outcome = await runWithXWikiAuth(req, (ctx) => handleMcpRequest(method, params, ctx, xwikiClient, toolConfig));
     } catch (e) {
+      if (isToolCall) logToolCall(req, params, startedAt, /^\w{1,64}$/.test(e?.name || "") ? e.name : "Error");
       return res.json({ jsonrpc: "2.0", id, error: { code: e.code || -32600, message: "Internal error" } });
+    }
+    if (isToolCall) {
+      const kind = outcome.unauthorized ? "xwiki_auth" : outcome.result?.isError ? "tool_error" : "ok";
+      logToolCall(req, params, startedAt, kind, outcome.result);
     }
     if (outcome.unauthorized) {
       return sendUnauthorized(res, cfg, {

@@ -19,7 +19,7 @@ const SECRET = "test-secret-32-chars-minimum-pad";
 const BASE = "https://xwiki.example.com/mcp";
 const CID = "client-1";
 
-async function setup({ search, extraOrigins = [] } = {}) {
+async function setup({ search, extraOrigins = [], authDebug = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-transport-"));
   const store = openStore({ file: path.join(dir, "s.json"), key: KEY });
   await store.mutate((s) => {
@@ -44,7 +44,7 @@ async function setup({ search, extraOrigins = [] } = {}) {
   };
   const app = createApp({
     sessionSecret: SECRET, mcpBaseUrl: BASE, store, xwikiClient, xwikiTokens,
-    authentik: {}, authDebug: false, extraOrigins, extraRedirectUris: [],
+    authentik: {}, authDebug, extraOrigins, extraRedirectUris: [],
   });
   const token = await new SignJWT({ sid, client_id: CID, ver: 1 })
     .setProtectedHeader({ alg: "HS256" }).setIssuer(BASE).setAudience(BASE).setSubject("sub-1")
@@ -454,4 +454,59 @@ test("tools/list exposes title, annotations and outputSchema", async () => {
   assert.equal(get.annotations.readOnlyHint, true);
   assert.equal(get.outputSchema.type, "object");
   assert.ok(get.title);
+});
+
+// --- AUTH_DEBUG: tool_call events ------------------------------------------------------------
+
+async function captureLog(fn) {
+  const lines = [];
+  const orig = { info: console.info, warn: console.warn };
+  console.info = (...a) => lines.push(a.join(" "));
+  console.warn = (...a) => lines.push(a.join(" "));
+  try { await fn(); } finally { Object.assign(console, orig); }
+  return lines;
+}
+const toolEvents = (lines) => lines.filter((l) => l.startsWith("[auth] ")).map((l) => JSON.parse(l.slice(7))).filter((e) => e.event === "tool_call");
+const SECRET_ARG = "SUPER-SECRET-ARGUMENT-VALUE-1234";
+const secretCall = { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "search_xwiki", arguments: { query: SECRET_ARG } } };
+
+test("AUTH_DEBUG tool_call ok: name, lengths, duration, short sid — never argument values or content", async () => {
+  const { app, token, sid } = await setup({ authDebug: true, search: () => [{ title: "RESULT-CONTENT-XYZ", url: "https://x/A" }] });
+  let res;
+  const lines = await captureLog(async () => {
+    res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`).send(secretCall);
+  });
+  assert.equal(res.status, 200);
+  const ev = toolEvents(lines);
+  assert.equal(ev.length, 1);
+  assert.equal(ev[0].tool, "search_xwiki");
+  assert.equal(ev[0].outcome, "ok");
+  assert.equal(ev[0].sid, sid.slice(0, 8));
+  assert.equal(ev[0].argsLength, JSON.stringify({ query: SECRET_ARG }).length);
+  assert.equal(ev[0].resultLength, res.body.result.content[0].text.length);
+  assert.equal(typeof ev[0].durationMs, "number");
+  const all = lines.join("\n");
+  assert.ok(!all.includes(SECRET_ARG), "argument value in debug log");
+  assert.ok(!all.includes("RESULT-CONTENT-XYZ"), "result content in debug log");
+});
+
+test("AUTH_DEBUG tool_call outcomes: tool_error, xwiki_auth", async () => {
+  const cases = [
+    [() => { throw new Error(`boom ${SECRET_ARG}`); }, "tool_error"],
+    [() => { throw new XWikiAuthError("expired"); }, "xwiki_auth"],
+  ];
+  for (const [search, outcome] of cases) {
+    const { app, token } = await setup({ authDebug: true, search });
+    const lines = await captureLog(() => request(app).post("/mcp").set("Authorization", `Bearer ${token}`).send(secretCall));
+    const ev = toolEvents(lines);
+    assert.equal(ev.length, 1, outcome);
+    assert.equal(ev[0].outcome, outcome);
+    assert.ok(!lines.join("\n").includes(SECRET_ARG), outcome);
+  }
+});
+
+test("AUTH_DEBUG off: no tool_call lines", async () => {
+  const { app, token } = await setup({ search: () => [] });
+  const lines = await captureLog(() => request(app).post("/mcp").set("Authorization", `Bearer ${token}`).send(secretCall));
+  assert.deepEqual(toolEvents(lines), []);
 });
