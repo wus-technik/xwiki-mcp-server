@@ -11,6 +11,8 @@ export class XWikiAuthError extends Error {
 }
 
 const DEFAULT_SYNTAX = "markdown/1.2";
+// XWiki REST search scopes (/rest/wikis/{wiki}/search?scope=...); the default is content only.
+const SEARCH_SCOPES = ["name", "title", "content"];
 export const MAX_SOURCE_URL_BYTES = 50 * 1024 * 1024;
 const SOURCE_URL_TIMEOUT_MS = 30_000;
 const MAX_SOURCE_URL_REDIRECTS = 5;
@@ -461,12 +463,23 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch, s
   return {
     async search(query, limitOrOptions = 10, optionsOrSessionCtx = {}, maybeSessionCtx = {}) {
       const { limit, options, sessionCtx } = resolveSearchArgs(limitOrOptions, optionsOrSessionCtx, maybeSessionCtx);
-      const url = `${baseUrl}/rest/wikis/${wiki}/search?q=${encodeURIComponent(query)}&number=${limit}`;
+      // Page name and title as well as content: a search for "EdooboxMCP" must find
+      // IT.LLM.MCP.EdooboxMCP even if the word is not in the page body.
+      const scopes = SEARCH_SCOPES.map((s) => `&scope=${s}`).join("");
+      const url = `${baseUrl}/rest/wikis/${wiki}/search?q=${encodeURIComponent(query)}${scopes}&number=${limit}`;
       const res = await fetcher(url, { headers: authHeaders(sessionCtx) });
       if (res.status === 401) throw new XWikiAuthError("XWiki session expired. Please re-authenticate.");
       if (!res.ok) throw new Error(`XWiki search failed: ${res.status}`);
       const data = await res.json();
-      const results = (data.searchResults || []).map((r) => ({
+      // One page can match in several scopes: keep its first hit only, then cap at limit.
+      const seen = new Set();
+      const unique = (data.searchResults || []).filter((r) => {
+        const key = r.id || r.pageFullName || [r.space, r.pageName].filter(Boolean).join(".");
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).slice(0, Math.max(0, limit));
+      const results = unique.map((r) => ({
         title: r.title || r.pageName,
         space: r.space,
         pagePath: r.pageFullName || [r.space, r.pageName].filter(Boolean).join("."),

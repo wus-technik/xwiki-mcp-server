@@ -739,3 +739,33 @@ test("the trusted-host exemption compares scheme-default ports", async () => {
     /disallowed internal\/private address/,
   );
 });
+
+// --- search scopes and dedupe ---------------------------------------------------------------
+
+test("search queries page name, title and content scopes and keeps the limit", async () => {
+  const fetcher = mockFetch(200, { searchResults: [] });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  await client.search("EdooboxMCP", 7, SESSION);
+  const url = new URL(fetcher.mock.calls[0].arguments[0]);
+  assert.equal(url.pathname, "/rest/wikis/xwiki/search");
+  assert.equal(url.searchParams.get("q"), "EdooboxMCP");
+  assert.deepEqual(url.searchParams.getAll("scope").sort(), ["content", "name", "title"]);
+  assert.equal(url.searchParams.get("number"), "7");
+});
+
+test("search dedupes results by page id (same page hit via name, title and content)", async () => {
+  const hit = { title: "EdooboxMCP", pageName: "WebHome", space: "IT.LLM.MCP.EdooboxMCP", pageFullName: "IT.LLM.MCP.EdooboxMCP.WebHome", id: "xwiki:IT.LLM.MCP.EdooboxMCP.WebHome" };
+  const other = { title: "Other", pageName: "WebHome", space: "IT.Other", pageFullName: "IT.Other.WebHome", id: "xwiki:IT.Other.WebHome" };
+  const fetcher = mockFetch(200, { searchResults: [hit, { ...hit }, other, { ...hit }] });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  const results = await client.search("EdooboxMCP", 10, SESSION);
+  assert.deepEqual(results.map((r) => r.title), ["EdooboxMCP", "Other"]);
+});
+
+test("search returns at most limit results after dedupe", async () => {
+  const mk = (n) => ({ title: `P${n}`, pageName: "WebHome", space: `S${n}`, pageFullName: `S${n}.WebHome`, id: `xwiki:S${n}.WebHome` });
+  const fetcher = mockFetch(200, { searchResults: [mk(1), mk(1), mk(2), mk(3), mk(4)] });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  const results = await client.search("p", 2, SESSION);
+  assert.deepEqual(results.map((r) => r.title), ["P1", "P2"]);
+});
