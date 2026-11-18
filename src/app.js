@@ -3,14 +3,16 @@ import cookieParser from "cookie-parser";
 import { loadConfig } from "./config.js";
 import { createOAuthRouter, createOAuthHandlers, sendError } from "./oauth.js";
 import { mountMetadata } from "./metadata.js";
-import { createAuthMiddleware } from "./auth-middleware.js";
+import { createAuthMiddleware, sessionCtxFrom, debugFields } from "./auth-middleware.js";
 import { createAuthDebugLogger } from "./auth-debug.js";
 import { createAuthentik } from "./authentik.js";
 import { createXWikiTokens } from "./xwiki-tokens.js";
 import { createXWikiClient, XWikiAuthError } from "./xwiki-client.js";
 import { createUploadRouter } from "./upload-route.js";
-import { handleMcpRequest } from "./mcp-handler.js";
-import { deleteSession } from "./session-store.js";
+import { handleMcpRequest, SUPPORTED_PROTOCOL_VERSIONS } from "./mcp-handler.js";
+import { sendUnauthorized } from "./metadata.js";
+import { isAllowedOrigin } from "./redirects.js";
+import { endSession } from "./sessions.js";
 
 const FLOW_PAGE_PATHS = new Set([
   "/authorize",
@@ -63,42 +65,93 @@ export function createApp(overrides = {}) {
   app.post("/revoke", h.revoke);
   app.post("/oauth/revoke", h.revoke);
 
-  const authMiddleware = createAuthMiddleware({
-    sessionSecret: cfg.sessionSecret,
-    mcpBaseUrl: cfg.mcpBaseUrl,
-    authDebugLogger,
-  });
+  const deps = app.locals.deps;
+  const authMiddleware = createAuthMiddleware({ ...deps, logger: authDebugLogger });
+
+  // Transport checks run before the token check. Origin: only browsers send it; a present
+  // Origin outside the allowlist is refused (DNS-rebinding protection of the MCP spec).
+  const transportGuard = (req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin !== undefined && !isAllowedOrigin(origin, cfg.mcpBaseUrl, cfg.extraOrigins || [])) {
+      authDebugLogger.warn("origin_rejected", req);
+      return res.status(403).json({ error: "forbidden_origin" });
+    }
+    const version = req.headers["mcp-protocol-version"];
+    if (version !== undefined && !SUPPORTED_PROTOCOL_VERSIONS.includes(version)) {
+      return res.status(400).json({ error: "unsupported_protocol_version", supported: SUPPORTED_PROTOCOL_VERSIONS });
+    }
+    next();
+  };
+
+  // XWikiAuthError handling. XWiki rejected the session's token. Under `session:<sid>`:
+  //  - session gone → 401 (someone else ended it);
+  //  - session has a newer tokenVersion than the one used (a renewal replaced the token while
+  //    the request was in flight) → retry ONCE, outside the lock, with the current token;
+  //  - otherwise the token is really dead (e.g. deleted in the XWiki profile) → endSession
+  //    ("xwiki-401", records the cleanup entry) and 401.
+  // A second XWikiAuthError on the retry never retries again: if yet another renewal raced
+  // it, the client just gets 401 and comes back with the session intact; otherwise the
+  // session is ended as above.
+  const runWithXWikiAuth = async (req, run) => {
+    let ctx = req.mcpSession;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return { result: await run(ctx) };
+      } catch (e) {
+        if (!(e instanceof XWikiAuthError)) throw e;
+        const sid = ctx.sessionId;
+        const usedVersion = ctx.tokenVersion;
+        const outcome = await deps.store.withLock(`session:${sid}`, async () => {
+          const state = deps.store.read();
+          const session = state.sessions[sid];
+          if (!session) return { kind: "gone" };
+          const newer = session.tokenVersion > usedVersion;
+          if (newer && attempt === 0) {
+            const fresh = sessionCtxFrom(deps.store, sid, session);
+            return fresh ? { kind: "retry", ctx: fresh } : { kind: "gone" };
+          }
+          if (newer) return { kind: "raced" };
+          authDebugLogger.warn("xwiki_token_rejected", req, debugFields(state, sid, session));
+          await endSession(deps, sid, "xwiki-401");
+          return { kind: "ended" };
+        });
+        if (outcome.kind === "retry") {
+          ctx = outcome.ctx;
+          continue;
+        }
+        return { unauthorized: true };
+      }
+    }
+  };
 
   const mcpRouter = express.Router();
 
   mcpRouter.use(createOAuthRouter(h));
 
-  mcpRouter.post("/", authMiddleware, async (req, res) => {
-    const { method, params, id } = req.body;
-    const sessionCtx = req.mcpSession;
+  // Only POST carries MCP messages; no SSE stream (GET) and no session termination (DELETE).
+  // Matches /mcp and /mcp/.
+  mcpRouter.route("/")
+    .get((_req, res) => res.set("Allow", "POST").status(405).json({ error: "method_not_allowed" }))
+    .delete((_req, res) => res.set("Allow", "POST").status(405).json({ error: "method_not_allowed" }));
 
-    let result;
+  mcpRouter.post("/", transportGuard, authMiddleware, async (req, res) => {
+    const { method, params, id } = req.body || {};
+    const toolConfig = { sessionSecret: cfg.sessionSecret, mcpBaseUrl: cfg.mcpBaseUrl };
+
+    let outcome;
     try {
-      result = await handleMcpRequest(method, params, sessionCtx, xwikiClient, {
-        sessionSecret: cfg.sessionSecret,
-        mcpBaseUrl: cfg.mcpBaseUrl,
-      });
+      outcome = await runWithXWikiAuth(req, (ctx) => handleMcpRequest(method, params, ctx, xwikiClient, toolConfig));
     } catch (e) {
-      if (e instanceof XWikiAuthError) {
-        authDebugLogger.warn("xwiki_session_expired", req, {
-          sessionId: req.mcpSession.sessionId,
-          userId: req.mcpSession.userId,
-        });
-        deleteSession(req.mcpSession.sessionId);
-        res.setHeader(
-          "WWW-Authenticate",
-          `Bearer error="invalid_token", error_description="XWiki session expired. Please re-authenticate."`
-        );
-        return res.status(401).json({ error: "xwiki_session_expired" });
-      }
       return res.json({ jsonrpc: "2.0", id, error: { code: e.code || -32600, message: "Internal error" } });
     }
+    if (outcome.unauthorized) {
+      return sendUnauthorized(res, cfg, {
+        error: "invalid_token",
+        description: "XWiki rejected the access token. Please re-authenticate.",
+      });
+    }
 
+    const { result } = outcome;
     if (result === null) {
       if (id === undefined) return res.status(202).end();
       return res.json({ jsonrpc: "2.0", id });

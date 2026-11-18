@@ -75,3 +75,13 @@ test("sendUnauthorized without args", async () => {
   assert.equal(res.headers["www-authenticate"], `Bearer realm="${base}", resource_metadata="${base}/.well-known/oauth-protected-resource"`);
   assert.deepEqual(res.body, { error: "unauthorized" });
 });
+
+test("sendUnauthorized sanitizes error like description (quotes, backslash, CR/LF)", async () => {
+  const app = express();
+  app.get("/u", (_req, res) => sendUnauthorized(res, cfg, { error: 'x"y\\z\r\nInjected: 1' }));
+  const res = await request(app).get("/u");
+  assert.equal(res.status, 401);
+  const h = res.headers["www-authenticate"];
+  assert.ok(h.includes(', error="x\\"y\\\\zInjected: 1"'), h);
+  assert.equal(res.body.error, 'x"y\\zInjected: 1');
+});

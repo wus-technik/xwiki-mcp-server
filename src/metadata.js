@@ -47,16 +47,16 @@ export function mountMetadata(app, cfg) {
   for (const p of AS_PATHS) app.get(p, (_req, res) => res.json(asMetadata(cfg)));
 }
 
+// Value of a quoted-string auth-param: CR/LF removed, `"` and `\` escaped.
+const quoted = (v) => String(v).replace(/[\r\n]/g, "").replace(/[\\"]/g, (c) => "\\" + c);
+
 export function sendUnauthorized(res, cfg, { error, description } = {}) {
   const base = cfg.mcpBaseUrl;
   let header = `Bearer realm="${base}", resource_metadata="${base}/.well-known/oauth-protected-resource"`;
-  if (error) header += `, error="${error}"`;
-  if (description) {
-    const safe = String(description).replace(/[\r\n]/g, "").replace(/[\\"]/g, (c) => "\\" + c);
-    header += `, error_description="${safe}"`;
-  }
+  if (error) header += `, error="${quoted(error)}"`;
+  if (description) header += `, error_description="${quoted(description)}"`;
   res.setHeader("WWW-Authenticate", header);
-  const body = { error: error || "unauthorized" };
+  const body = { error: error ? String(error).replace(/[\r\n]/g, "") : "unauthorized" };
   if (description) body.error_description = String(description).replace(/[\r\n]/g, "");
   return res.status(401).json(body);
 }
