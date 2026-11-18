@@ -10,19 +10,38 @@ MCP (Model Context Protocol) server for interacting with XWiki instances. This s
 
 ## 🔐 Authentication
 
-Login is browser-based via Authentik SSO. MCP clients that support remote MCP OAuth (e.g. Claude Desktop) will open a browser window automatically.
+The server is its own OAuth 2.1 authorization server (dynamic client registration, PKCE S256, rotating refresh tokens) and signs users in through Authentik:
 
-1. Connect your MCP client to `https://xwiki.wus-technik.com/mcp`
-2. The client discovers OAuth endpoints from `/.well-known/oauth-protected-resource`
-3. Your browser opens → Authentik login (skip if already logged in via SSO)
-4. MCP client receives a session token and connects
-5. All XWiki actions run under your real user permissions
+1. The MCP client registers itself and opens the browser at `/mcp/oauth/authorize`.
+2. The user signs in at Authentik (transparent if an SSO session exists). Only members of `ALLOWED_GROUPS` get through.
+3. The browser passes through the XWiki login on the same hostname; the resulting XWiki session cookie is used for exactly one request.
+4. On the first login with a client the user confirms access on a consent page.
+5. With that one-time cookie the server creates a personal XWiki consent token (`xwiki-mcp – <client> – <date>`, 90 days) and discards the cookie. The token appears in the XWiki profile under "Applications" and can be revoked there.
+6. The client receives an access token (1 h) and a refresh token (rotated on every use, valid for 30 days after its last use).
+
+All XWiki calls then run with `Authorization: Bearer <consent token>` under the user's own permissions, so an XWiki restart does not end the session. The XWiki token is renewed automatically once less than 14 days are left. A session ends when the client revokes it, when the client has not refreshed for 30 days, when Authentik rejects the user (deactivated or no longer in an allowed group), or when the token is deleted in the XWiki profile. The server then deletes the session's XWiki token as well.
+
+## 🔌 Connecting a client
+
+The URL is all a client needs. It discovers the OAuth endpoints from `/.well-known/oauth-protected-resource` and opens the browser for the login:
+
+```
+https://xwiki.wus-technik.com/mcp
+```
+
+- **claude.ai / Claude app:** add a custom connector with this URL and connect.
+- **ChatGPT (chatgpt.com / app):** add a connector (developer mode) with this URL and connect.
+- **Claude Code:** `claude mcp add --transport http xwiki https://xwiki.wus-technik.com/mcp`, then log in via `/mcp`.
+- **Codex CLI:** `codex mcp add xwiki --url https://xwiki.wus-technik.com/mcp`, then `codex mcp login xwiki`.
+
+No client secret, header or token has to be configured by hand.
 
 ## 📋 Prerequisites
 
 - Docker and Docker Compose installed
 - Node.js 20+ (if running without Docker)
-- Access to an XWiki instance with REST API enabled
+- Access to an XWiki instance with REST API enabled and consent tokens in the user profile ("Applications"; tested with XWiki 18.7.0)
+- An Authentik OAuth2/OIDC application (scopes `openid profile email offline_access`)
 
 ## 🔧 Installation
 
@@ -34,24 +53,35 @@ git clone https://github.com/alfredfs85/xwiki-mcp-server.git
 cd xwiki-mcp-server
 ```
 
-2. Configure environment variables by creating a `.env` file:
+2. Generate the two secrets (32 random bytes each) and store them in the password manager:
+```bash
+openssl rand -base64 32   # SESSION_SECRET
+openssl rand -base64 32   # TOKEN_ENC_KEY
+```
+
+3. Provide the environment variables (see [Environment Variables](#-environment-variables)) in the shell or stack definition that runs Compose:
 ```bash
 XWIKI_URL=http://your-xwiki-internal-host:8080
-XWIKI_WIKI=xwiki
+XWIKI_PUBLIC_URL=https://your-domain.com
 AUTHENTIK_ISSUER=https://your-authentik-instance.com
+AUTHENTIK_APP_SLUG=xwiki-mcp
 OAUTH_CLIENT_ID=your_client_id
 OAUTH_CLIENT_SECRET=your_client_secret
 OAUTH_REDIRECT_URI=https://your-domain.com/mcp/oauth/callback
 MCP_BASE_URL=https://your-domain.com/mcp
-SESSION_SECRET=your_random_secret
+SESSION_SECRET=<32 random bytes, base64>
+TOKEN_ENC_KEY=<32 random bytes, base64>
 ```
+`docker-compose.yml` sets `STORE_FILE=/data/store.json` on the `./data` volume.
 
-3. Build and run the container:
+> **Important:** the store file is unusable without its key. Back up `TOKEN_ENC_KEY` in the password manager. If the key is missing or wrong, the server refuses to start (no automatic fresh start).
+
+4. Build and run the container:
 ```bash
 docker-compose up -d --build
 ```
 
-4. Verify the server is running:
+5. Verify the server is running:
 ```bash
 curl https://your-domain.com/mcp/health
 ```
@@ -63,79 +93,62 @@ curl https://your-domain.com/mcp/health
 npm install
 ```
 
-2. Configure environment variables:
-```bash
-export XWIKI_URL=http://your-xwiki-internal-host:8080
-export XWIKI_WIKI=xwiki
-export AUTHENTIK_ISSUER=https://your-authentik-instance.com
-export OAUTH_CLIENT_ID=your_client_id
-export OAUTH_CLIENT_SECRET=your_client_secret
-export OAUTH_REDIRECT_URI=https://your-domain.com/mcp/oauth/callback
-export MCP_BASE_URL=https://your-domain.com/mcp
-export SESSION_SECRET=your_random_secret
-```
+2. Set the same environment variables as above, plus a writable store path, e.g. `STORE_FILE=./data/store.json`.
 
 3. Run the server:
 ```bash
 node server.js
 ```
 
-The server will be available at `http://localhost:3000`
+The server listens on `http://localhost:3000`. It exits with code 1 if `SESSION_SECRET`, `TOKEN_ENC_KEY` or `STORE_FILE` is missing or invalid, or if the store file cannot be opened with the key.
 
 ## 🚀 Deployment (HAProxy)
 
-The MCP server must share the same public hostname as XWiki so the browser's XWiki session cookie is present on MCP requests.
+The MCP server must share the public hostname with XWiki: the login passes through the XWiki login on the same origin, so the XWiki session cookie reaches `/mcp/oauth/complete`. The proxy forwards these paths to the MCP backend **unchanged** (no path rewriting) and everything else to XWiki:
 
 ```
-frontend https-in
-  bind *:443 ssl crt /etc/ssl/certs/xwiki.pem
-  # Match both /mcp (exact — the JSON-RPC endpoint) and /mcp/* (SSE, OAuth, discovery)
-  acl is_mcp     path     /mcp
-  acl is_mcp_sub path_beg /mcp/
-  use_backend mcp_backend if is_mcp OR is_mcp_sub
-  default_backend xwiki_backend
-
-backend mcp_backend
-  option forwardfor
-  http-request set-header X-Forwarded-Host %[req.hdr(Host)]
-  http-request set-header X-Forwarded-Proto https
-  # Strip the /mcp/ prefix so Express receives clean paths (/sse, /oauth/callback, etc.)
-  # Paths without a trailing slash (i.e. /mcp itself) are passed through unchanged.
-  http-request set-path %[path,regsub(^/mcp/,/)]
-  server mcp 127.0.0.1:3000
-
-backend xwiki_backend
-  server xwiki 127.0.0.1:8080
+^/(mcp(/.*)?|register|authorize|token|revoke|\.well-known/(oauth-protected-resource|oauth-authorization-server)(/mcp)?|\.well-known/openid-configuration/mcp)$
 ```
 
-Preserve `Host` header so OAuth redirect URIs and callback URLs resolve correctly.
+The root paths (`/register`, `/authorize`, `/token`, `/revoke` and the discovery documents) serve clients that build OAuth URLs from the origin and ignore the `/mcp` base path. `/.well-known/openid-configuration` without suffix stays with XWiki.
 
 **Required env vars for this setup:**
 - `XWIKI_URL=http://xwiki-postgres-tomcat-web:8080` — use the internal Docker hostname (join the same network)
 - `XWIKI_PUBLIC_URL=https://xwiki.wus-technik.com` — public URL used for page links returned to clients
 - `MCP_BASE_URL=https://xwiki.wus-technik.com/mcp`
-- `OAUTH_REDIRECT_URI=https://xwiki.wus-technik.com/mcp/oauth/callback` — includes the `/mcp/` prefix (goes through HAProxy)
+- `OAUTH_REDIRECT_URI=https://xwiki.wus-technik.com/mcp/oauth/callback`
 
 ## 📡 Endpoints
 
-### Health Check
-```
-GET /health
-```
-Returns the server status and XWiki configuration.
-
-### MCP JSON-RPC
+### MCP (Streamable HTTP, JSON responses)
 ```
 POST /mcp
 ```
-Main endpoint for MCP communication using JSON-RPC 2.0.
+JSON-RPC 2.0 with `Authorization: Bearer <access token>`. `GET` and `DELETE` on `/mcp` answer 405 (no SSE stream). Without a valid token the answer is 401 with a `WWW-Authenticate` header that points to the resource metadata.
 
-### Server-Sent Events (SSE)
+### OAuth
 ```
-GET /sse
-POST /messages?sessionId={sessionId}
+POST /mcp/oauth/register     dynamic client registration
+GET  /mcp/oauth/authorize    login (browser)
+GET  /mcp/oauth/callback     return from Authentik
+GET  /mcp/oauth/complete     return from the XWiki login
+POST /mcp/oauth/consent      consent page
+POST /mcp/oauth/token        authorization_code and refresh_token grants
+POST /mcp/oauth/revoke       revocation (RFC 7009): ends the session and deletes its XWiki token
 ```
-Alternative endpoints for communication via Server-Sent Events.
+
+### Discovery
+```
+GET /.well-known/oauth-protected-resource
+GET /.well-known/oauth-authorization-server
+```
+Also served below `/mcp/.well-known/…` and with the `/mcp` suffix.
+
+### Health Check
+```
+GET /mcp/health
+```
+Returns the server status and whether XWiki is configured.
 
 ## 🛠️ Available Tools
 
@@ -212,42 +225,37 @@ Creates or updates a page in XWiki.
 }
 ```
 
-## 🔌 Integration with Cursor/Claude Desktop
-
-To use this MCP server with Cursor or Claude Desktop, add the following configuration to your MCP configuration file:
-
-```json
-{
-  "mcpServers": {
-    "xwiki": {
-      "url": "http://localhost:3000/mcp",
-      "transport": "http"
-    }
-  }
-}
-```
-
 ## 🐳 Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `PORT` | Server port | `3000` |
-| `XWIKI_URL` | XWiki internal URL (used for REST API calls) | - |
-| `XWIKI_PUBLIC_URL` | Public XWiki URL used for page links in tool results | `XWIKI_URL` |
-| `XWIKI_WIKI` | Wiki name | `xwiki` |
-| `AUTHENTIK_ISSUER` | Authentik base URL | - |
-| `OAUTH_CLIENT_ID` | Authentik OAuth2 client ID | - |
-| `OAUTH_CLIENT_SECRET` | Authentik OAuth2 client secret | - |
-| `OAUTH_REDIRECT_URI` | OAuth callback URL (must include `/mcp/` prefix if behind HAProxy) | - |
-| `MCP_BASE_URL` | Public base URL of the MCP server | - |
-| `SESSION_SECRET` | Secret for signing JWTs (min 32 chars) | - |
-| `NODE_ENV` | Set to `production` to enforce TLS | - |
+| Variable | Description | Required | Default |
+|----------|-------------|----------|---------|
+| `PORT` | Server port | no | `3000` |
+| `XWIKI_URL` | XWiki internal URL (REST calls and the consent token page) | yes | - |
+| `XWIKI_PUBLIC_URL` | Public XWiki URL used for page links in tool results | no | `XWIKI_URL` |
+| `XWIKI_WIKI` | Wiki name | no | `xwiki` |
+| `AUTHENTIK_ISSUER` | Authentik base URL (e.g. `https://auth.example.com`) | yes | - |
+| `AUTHENTIK_APP_SLUG` | Slug of the Authentik application; ID token issuer `<AUTHENTIK_ISSUER>/application/o/<slug>/` | no | `xwiki-mcp` |
+| `OAUTH_CLIENT_ID` | Authentik OAuth2 client ID | yes | - |
+| `OAUTH_CLIENT_SECRET` | Authentik OAuth2 client secret | yes | - |
+| `OAUTH_REDIRECT_URI` | Callback URL registered in Authentik, `<MCP_BASE_URL>/oauth/callback` | yes | - |
+| `MCP_BASE_URL` | Public base URL of the MCP server; issuer and resource in the OAuth metadata | yes | `http://localhost:<PORT>` |
+| `SESSION_SECRET` | Signs the access tokens (HS256); at least 32 bytes. The server does not start without it | yes | - |
+| `TOKEN_ENC_KEY` | Encrypts the secrets in the store file; exactly 32 bytes, standard base64. The server does not start without it | yes | - |
+| `STORE_FILE` | Path of the persistent store (clients, consents, sessions, refresh token families, pending cleanups) | yes | - (Compose: `/data/store.json`) |
+| `ALLOWED_GROUPS` | Authentik groups allowed to log in (comma-separated) | no | `AdminsIT,xwiki_redaktion` |
+| `EXTRA_REDIRECT_URIS` | Additional client redirect URIs (comma-separated, exact match) besides loopback, claude.ai, claude.com and chatgpt.com | no | empty |
+| `EXTRA_ORIGINS` | Additional allowed `Origin` values for `POST /mcp` besides claude.ai, claude.com, chatgpt.com and the origin of `MCP_BASE_URL` | no | empty |
+| `AUTH_DEBUG` | `1` logs auth events (event name, shortened session id, user, client name; never tokens or cookies) | no | off |
+| `NODE_ENV` | `production` refuses `NODE_TLS_REJECT_UNAUTHORIZED=0` | no | `development` |
+
+> **The store file is unusable without its key.** Back up `TOKEN_ENC_KEY` (and `SESSION_SECRET`) in the password manager. With a wrong or missing key the server does not start.
 
 ## 📝 Security Notes
 
 - ⚠️ **Never** commit credentials to the repository
-- ⚠️ Self-signed SSL certificates are for development only
-- ⚠️ In production, use valid certificates and set `NODE_TLS_REJECT_UNAUTHORIZED=1`
+- ⚠️ The store file holds the XWiki consent tokens and Authentik refresh tokens encrypted with `TOKEN_ENC_KEY` (AES-256-GCM); refresh tokens of the MCP clients are stored only as SHA-256 hashes. Browser cookies are never stored.
+- ⚠️ No token, cookie or refresh token is written to the log
+- ⚠️ `NODE_TLS_REJECT_UNAUTHORIZED=0` is for development only and refused with `NODE_ENV=production`
 - ⚠️ The `.env` file is in `.gitignore` for security
 
 ## 🤝 Contributing
