@@ -361,3 +361,36 @@ test("advertised /mcp/oauth/{authorize,token,register,revoke} routes exist", asy
     assert.notEqual(res.status, 405, `${m.toUpperCase()} ${p}`);
   }
 });
+
+// --- auth before parser, Origin on every method ----------------------------------------------
+
+test("no token + malformed JSON → 401 with resource_metadata (auth before the parser)", async () => {
+  const { app } = await setup();
+  for (const p of ["/mcp", "/mcp/"]) {
+    const res = await request(app).post(p).set("Content-Type", "application/json").send("{not json");
+    assert.equal(res.status, 401, p);
+    assert.match(res.headers["www-authenticate"], /resource_metadata=/);
+  }
+});
+
+test("valid token + malformed JSON → 400 invalid_request", async () => {
+  const { app, token } = await setup();
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+    .set("Content-Type", "application/json").send("{not json");
+  assert.equal(res.status, 400);
+  assert.equal(res.body.error, "invalid_request");
+});
+
+for (const method of ["get", "delete"]) {
+  for (const p of ["/mcp", "/mcp/"]) {
+    test(`${method.toUpperCase()} ${p} with a bad Origin → 403, without Origin → 405 Allow: POST`, async () => {
+      const { app } = await setup();
+      const bad = await request(app)[method](p).set("Origin", "https://evil.example");
+      assert.equal(bad.status, 403);
+      assert.equal(bad.body.error, "forbidden_origin");
+      const ok = await request(app)[method](p);
+      assert.equal(ok.status, 405);
+      assert.equal(ok.headers.allow, "POST");
+    });
+  }
+}

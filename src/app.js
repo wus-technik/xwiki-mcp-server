@@ -33,7 +33,7 @@ export function createApp(overrides = {}) {
 
   const app = express();
   const authDebugLogger = createAuthDebugLogger(cfg.authDebug);
-  // Origin check for POST /mcp, mounted BEFORE the body parsers and the token check, so a
+  // Origin check for every method on /mcp, mounted BEFORE the body parsers and the token check, so a
   // refused Origin wins over a malformed body or a missing token. Only browsers send Origin;
   // a present Origin outside the allowlist is refused (DNS-rebinding protection of the MCP spec).
   // The MCP-Protocol-Version check is NOT here: it runs behind the login (see versionGuard),
@@ -51,15 +51,19 @@ export function createApp(overrides = {}) {
   const versionGuard = (req, res, next) => {
     const version = req.headers["mcp-protocol-version"];
     if (version !== undefined && !SUPPORTED_PROTOCOL_VERSIONS.includes(version) && req.body?.method !== "initialize") {
-      authDebugLogger.warn("protocol_version_rejected", req, { protocolVersion: String(version).slice(0, 64) });
+      authDebugLogger.warn("protocol_version_rejected", req, { protocolVersion: /^[\w.-]{1,32}$/.test(version) ? version : "<invalid>" });
       return res.status(400).json({ error: "unsupported_protocol_version", supported: SUPPORTED_PROTOCOL_VERSIONS });
     }
     next();
   };
 
-  app.post("/mcp", transportGuard);
+  // Every method on /mcp and /mcp/ (also the 405 ones), before parsers and token check.
+  app.all("/mcp", transportGuard);
   // Upload PUTs stream a raw body: the global parsers must not touch them.
-  const notUpload = (mw) => (req, res, next) => (req.method === "PUT" && req.path.startsWith("/mcp/uploads/") ? next() : mw(req, res, next));
+  // POST /mcp parses its JSON body itself, behind the login (auth before parser).
+  const notUpload = (mw) => (req, res, next) => (
+    (req.method === "PUT" && req.path.startsWith("/mcp/uploads/")) || (req.method === "POST" && (req.path === "/mcp" || req.path === "/mcp/"))
+      ? next() : mw(req, res, next));
   app.use(notUpload(express.json()));
   app.use(notUpload(express.urlencoded({ extended: false })));
   app.use(cookieParser());
@@ -146,7 +150,7 @@ export function createApp(overrides = {}) {
     .get((_req, res) => res.set("Allow", "POST").status(405).json({ error: "method_not_allowed" }))
     .delete((_req, res) => res.set("Allow", "POST").status(405).json({ error: "method_not_allowed" }));
 
-  mcpRouter.post("/", authMiddleware, versionGuard, async (req, res) => {
+  mcpRouter.post("/", authMiddleware, express.json(), versionGuard, async (req, res) => {
     const body = req.body;
     // No batching: an array (or any non-object body) is an invalid request.
     if (!body || typeof body !== "object" || Array.isArray(body)) {
