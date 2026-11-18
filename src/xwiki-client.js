@@ -76,7 +76,7 @@ export function isDisallowedIp(ip) {
   if (!g) return true;
   const embedded = () => isDisallowedIpv4Int(g[6] * 65536 + g[7]);
   const zeroUpTo = (n) => g.slice(0, n).every((x) => x === 0);
-  if (zeroUpTo(5) && g[5] === 0xffff) return embedded(); // IPv4-mapped ::ffff:0:0/96
+  if (zeroUpTo(5) && g[5] === 0xffff) return true; // IPv4-mapped ::ffff:0:0/96, whole prefix
   if (zeroUpTo(6)) return true; // ::, ::1 and the deprecated IPv4-compatible ::/96
   if (g[0] === 0x64 && g[1] === 0xff9b) { // NAT64: well-known /96 embeds IPv4, the rest is local-use
     return g.slice(2, 6).every((x) => x === 0) ? embedded() : true;
@@ -90,14 +90,23 @@ export function isDisallowedIp(ip) {
   return false;
 }
 
+// "scheme//host:effective-port" — URL.port is empty for the scheme's default port.
+function originKey(url) {
+  const port = url.port || (url.protocol === "https:" ? "443" : "80");
+  return `${url.protocol}//${url.hostname.toLowerCase()}:${port}`;
+}
+
 export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch, sourceLookup }) {
   const linkBase = (publicUrl || baseUrl || "").replace(/\/$/, "");
   // Resolver for source_url hosts: (hostname) -> [{ address, family }]. Injectable for tests.
   const resolveSourceHost = sourceLookup || ((hostname) => dnsLookup(hostname, { all: true, verbatim: true }));
 
-  let trustedHost = "";
+  // The configured XWiki origin (scheme, host, effective port) is the only source_url target
+  // whose resolved address is not IP-checked; other ports on that host are checked normally.
+  let trustedOrigin = "";
   try {
-    trustedHost = new URL(baseUrl).hostname.toLowerCase();
+    const base = new URL(baseUrl);
+    if (base.protocol === "http:" || base.protocol === "https:") trustedOrigin = originKey(base);
   } catch {
     // no configured baseUrl to trust; every source_url host is IP-checked
   }
@@ -118,9 +127,11 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch, s
     if (url.protocol !== "http:" && url.protocol !== "https:") {
       throw new Error("source_url must use http or https");
     }
+    // Node would turn userinfo into an Authorization: Basic header.
+    if (url.username || url.password) throw new Error("source_url must not contain credentials");
     const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
     if (!host) throw new Error("source_url has no host");
-    const trusted = trustedHost !== "" && host === trustedHost;
+    const trusted = trustedOrigin !== "" && originKey(url) === trustedOrigin;
     if (!trusted && isIP(host) && isDisallowedIp(host)) throw new Error(DISALLOWED_ADDRESS);
     return trusted;
   }

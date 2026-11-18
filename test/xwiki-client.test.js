@@ -88,7 +88,7 @@ test("every XWiki REST call sends Authorization: Bearer and no Cookie", async ()
   const fetcher = xwikiFake();
   await withSourceServer((req, res) => res.end("bytes"), async (port, seen) => {
     const client = createXWikiClient({
-      baseUrl: "http://xwiki.internal:8080",
+      baseUrl: `http://xwiki.internal:${port}`,
       wiki: WIKI,
       fetcher,
       sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1" }),
@@ -442,7 +442,7 @@ test("uploadAttachment fetches bytes server-side from source_url and PUTs them w
     res.end("hello pdf");
   }, async (port) => {
     const client = createXWikiClient({
-      baseUrl: "http://xwiki-internal:8080",
+      baseUrl: `http://xwiki-internal:${port}`,
       publicUrl: "https://xwiki.example.com/",
       wiki: WIKI,
       fetcher,
@@ -458,14 +458,14 @@ test("uploadAttachment fetches bytes server-side from source_url and PUTs them w
   });
   const put = fetcher.mock.calls.find((c) => c.arguments[1].method === "PUT");
   assert.ok(Buffer.from(put.arguments[1].body).equals(Buffer.from("hello pdf")));
-  assert.ok(fetcher.mock.calls.every((c) => c.arguments[0].startsWith("http://xwiki-internal:8080/rest/")));
+  assert.ok(fetcher.mock.calls.every((c) => /^http:\/\/xwiki-internal:\d+\/rest\//.test(c.arguments[0])));
 });
 
 test("source_url on the trusted XWiki host may resolve to a private address", async () => {
   await withSourceServer((req, res) => res.end("hi"), async (port, seen) => {
     const lookup = mapLookup({ "xwiki-postgres-tomcat-web": "127.0.0.1" });
     const client = createXWikiClient({
-      baseUrl: "http://xwiki-postgres-tomcat-web:8080",
+      baseUrl: `http://xwiki-postgres-tomcat-web:${port}`,
       wiki: WIKI,
       fetcher: xwikiFake(),
       sourceLookup: lookup,
@@ -509,7 +509,7 @@ test("source_url 302 to http://127.0.0.1/... is refused before connecting", asyn
   }, async (port, seen) => {
     const fetcher = xwikiFake();
     const client = createXWikiClient({
-      baseUrl: "http://xwiki.internal", wiki: WIKI, fetcher, sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1" }),
+      baseUrl: `http://xwiki.internal:${port}`, wiki: WIKI, fetcher, sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1" }),
     });
     await assert.rejects(
       () => client.uploadAttachment("Main.P", "a.bin", { sourceUrl: `http://xwiki.internal:${port}/start` }, SESSION),
@@ -527,7 +527,7 @@ test("source_url redirect to a name resolving to a private address is refused", 
     res.end();
   }, async (port) => {
     const client = createXWikiClient({
-      baseUrl: "http://xwiki.internal",
+      baseUrl: `http://xwiki.internal:${port}`,
       wiki: WIKI,
       fetcher: xwikiFake(),
       sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1", "intranet.example.org": "192.168.1.5" }),
@@ -546,7 +546,7 @@ test("source_url redirect to a non-http scheme is refused", async () => {
     res.end();
   }, async (port) => {
     const client = createXWikiClient({
-      baseUrl: "http://xwiki.internal", wiki: WIKI, fetcher: xwikiFake(), sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1" }),
+      baseUrl: `http://xwiki.internal:${port}`, wiki: WIKI, fetcher: xwikiFake(), sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1" }),
     });
     await assert.rejects(
       () => client.uploadAttachment("Main.P", "a.bin", { sourceUrl: `http://xwiki.internal:${port}/start` }, SESSION),
@@ -565,7 +565,7 @@ function redirectChain(req, res) {
 test("source_url: six redirects in a row fail with too many redirects", async () => {
   await withSourceServer(redirectChain, async (port, seen) => {
     const client = createXWikiClient({
-      baseUrl: "http://xwiki.internal", wiki: WIKI, fetcher: xwikiFake(), sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1" }),
+      baseUrl: `http://xwiki.internal:${port}`, wiki: WIKI, fetcher: xwikiFake(), sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1" }),
     });
     await assert.rejects(
       () => client.uploadAttachment("Main.P", "a.bin", { sourceUrl: `http://xwiki.internal:${port}/r/0` }, SESSION),
@@ -582,7 +582,7 @@ test("source_url: five redirects are followed", async () => {
   }, async (port, seen) => {
     const fetcher = xwikiFake();
     const client = createXWikiClient({
-      baseUrl: "http://xwiki.internal", wiki: WIKI, fetcher, sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1" }),
+      baseUrl: `http://xwiki.internal:${port}`, wiki: WIKI, fetcher, sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1" }),
     });
     await client.uploadAttachment("Main.P", "a.bin", { sourceUrl: `http://xwiki.internal:${port}/r/0` }, SESSION);
     assert.equal(seen.length, 6);
@@ -594,7 +594,7 @@ test("source_url: five redirects are followed", async () => {
 test("source_url non-2xx answer is an error", async () => {
   await withSourceServer((req, res) => { res.statusCode = 404; res.end(); }, async (port) => {
     const client = createXWikiClient({
-      baseUrl: "http://xwiki.internal", wiki: WIKI, fetcher: xwikiFake(), sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1" }),
+      baseUrl: `http://xwiki.internal:${port}`, wiki: WIKI, fetcher: xwikiFake(), sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1" }),
     });
     await assert.rejects(
       () => client.uploadAttachment("Main.P", "a.bin", { sourceUrl: `http://xwiki.internal:${port}/x` }, SESSION),
@@ -610,7 +610,7 @@ test("uploadAttachment rejects an oversized source_url response via Content-Leng
   }, async (port) => {
     const fetcher = xwikiFake();
     const client = createXWikiClient({
-      baseUrl: "http://xwiki.internal", wiki: WIKI, fetcher, sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1" }),
+      baseUrl: `http://xwiki.internal:${port}`, wiki: WIKI, fetcher, sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1" }),
     });
     await assert.rejects(
       () => client.uploadAttachment("Main.P", "a.bin", { sourceUrl: `http://xwiki.internal:${port}/huge` }, SESSION),
@@ -636,7 +636,7 @@ test("uploadAttachment rejects an oversized source_url body even when Content-Le
   }, async (port) => {
     const fetcher = xwikiFake();
     const client = createXWikiClient({
-      baseUrl: "http://xwiki.internal", wiki: WIKI, fetcher, sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1" }),
+      baseUrl: `http://xwiki.internal:${port}`, wiki: WIKI, fetcher, sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1" }),
     });
     await assert.rejects(
       () => client.uploadAttachment("Main.P", "a.bin", { sourceUrl: `http://xwiki.internal:${port}/huge` }, SESSION),
@@ -650,7 +650,7 @@ test("uploadAttachment throws XWikiAuthError on 401 during form token fetch", as
   await withSourceServer((req, res) => res.end("hi"), async (port) => {
     const fetcher = mock.fn(async () => ({ ok: false, status: 401, headers: { get: () => null }, json: async () => ({}) }));
     const client = createXWikiClient({
-      baseUrl: "http://xwiki.internal", wiki: WIKI, fetcher, sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1" }),
+      baseUrl: `http://xwiki.internal:${port}`, wiki: WIKI, fetcher, sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1" }),
     });
     await assert.rejects(
       () => client.uploadAttachment("Main.P", "a.bin", { sourceUrl: `http://xwiki.internal:${port}/a` }, SESSION),
@@ -665,9 +665,77 @@ test("isDisallowedIp covers internal, special and IPv4-mapped ranges", () => {
     "0.0.0.0", "100.64.0.1", "100.127.255.255", "224.0.0.1", "239.255.255.250", "255.255.255.255",
     "::", "::1", "fe80::1", "fc00::1", "fd12:3456::1", "ff02::1",
     "::ffff:127.0.0.1", "::ffff:7f00:1", "::ffff:a00:1", "::ffff:169.254.169.254", "0:0:0:0:0:ffff:7f00:1",
+    // the whole IPv4-mapped prefix ::ffff:0:0/96 is refused, public embedded addresses too
+    "::ffff:8.8.8.8", "::ffff:808:808", "0:0:0:0:0:ffff:0808:0808",
     "not-an-ip", "1.2.3",
   ];
-  const allowed = ["8.8.8.8", "1.1.1.1", "172.32.0.1", "100.128.0.1", "2606:4700:4700::1111", "::ffff:8.8.8.8"];
+  const allowed = ["8.8.8.8", "1.1.1.1", "172.32.0.1", "100.128.0.1", "2606:4700:4700::1111"];
   for (const ip of blocked) assert.equal(isDisallowedIp(ip), true, ip);
   for (const ip of allowed) assert.equal(isDisallowedIp(ip), false, ip);
+});
+
+// ---- hardening after review: credentials in source_url, trusted host pinned to its port ----
+
+test("source_url with userinfo is refused before any connection", async () => {
+  const lookup = mapLookup({ "files.example.org": "93.184.216.34" });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher: xwikiFake(), sourceLookup: lookup });
+  for (const sourceUrl of ["http://user:pw@files.example.org/a", "https://user@files.example.org/a", "http://:pw@files.example.org/a"]) {
+    await assert.rejects(
+      () => client.uploadAttachment("Main.P", "a.bin", { sourceUrl }, SESSION),
+      /source_url must not contain credentials/,
+      sourceUrl,
+    );
+  }
+  assert.equal(lookup.mock.calls.length, 0);
+});
+
+test("source_url redirect to a URL with userinfo is refused", async () => {
+  await withSourceServer((req, res) => {
+    if (req.url !== "/start") {
+      res.end("must not be reached");
+      return;
+    }
+    res.statusCode = 302;
+    res.setHeader("location", `http://user:pw@xwiki.internal:${req.socket.localPort}/next`);
+    res.end();
+  }, async (port, seen) => {
+    const client = createXWikiClient({
+      baseUrl: `http://xwiki.internal:${port}`, wiki: WIKI, fetcher: xwikiFake(), sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1" }),
+    });
+    await assert.rejects(
+      () => client.uploadAttachment("Main.P", "a.bin", { sourceUrl: `http://xwiki.internal:${port}/start` }, SESSION),
+      /source_url must not contain credentials/,
+    );
+    assert.deepEqual(seen.map((s) => s.url), ["/start"]);
+  });
+});
+
+test("the trusted XWiki host is exempt only on the configured port", async () => {
+  await withSourceServer((req, res) => res.end("hi"), async (port, seen) => {
+    // baseUrl names another port on the same host: the source server's port is not exempt,
+    // so its private address is checked and refused
+    const otherPort = port === 65535 ? port - 1 : port + 1;
+    const client = createXWikiClient({
+      baseUrl: `http://xwiki.internal:${otherPort}`, wiki: WIKI, fetcher: xwikiFake(), sourceLookup: mapLookup({ "xwiki.internal": "127.0.0.1" }),
+    });
+    await assert.rejects(
+      () => client.uploadAttachment("Main.P", "a.bin", { sourceUrl: `http://xwiki.internal:${port}/a` }, SESSION),
+      /disallowed internal\/private address/,
+    );
+    assert.equal(seen.length, 0);
+  });
+});
+
+test("the trusted-host exemption compares scheme-default ports", async () => {
+  const lookup = mapLookup({ "xwiki.internal": "10.0.0.5" });
+  // baseUrl https without port = 443; source on http (port 80) of the same host is not exempt
+  const client = createXWikiClient({ baseUrl: "https://xwiki.internal", wiki: WIKI, fetcher: xwikiFake(), sourceLookup: lookup });
+  await assert.rejects(
+    () => client.uploadAttachment("Main.P", "a.bin", { sourceUrl: "http://xwiki.internal/a" }, SESSION),
+    /disallowed internal\/private address/,
+  );
+  await assert.rejects(
+    () => client.uploadAttachment("Main.P", "a.bin", { sourceUrl: "https://xwiki.internal:8443/a" }, SESSION),
+    /disallowed internal\/private address/,
+  );
 });
