@@ -12,7 +12,7 @@ import { createApp } from "../src/app.js";
 import { openStore } from "../src/store.js";
 import { createSession, sealAad } from "../src/sessions.js";
 import { XWikiAuthError } from "../src/xwiki-client.js";
-import { handleMcpRequest } from "../src/mcp-handler.js";
+import { handleMcpRequest, isAcceptedProtocolVersionHeader } from "../src/mcp-handler.js";
 
 const KEY = Buffer.alloc(32, 5);
 const SECRET = "test-secret-32-chars-minimum-pad";
@@ -165,7 +165,7 @@ test("authenticated initialize with protocolVersion 2025-11-25 → 200, 2025-11-
   assert.equal(res.body.result.protocolVersion, "2025-11-25");
 });
 
-for (const v of ["2025-01-01", "2024-10-07", "1999-01-01", "latest", "2026-7-28", "2026-07-28x", "20260728"]) {
+for (const v of ["2025-01-01", "2024-10-07", "1999-01-01", "latest", "2026-7-28", "2026-07-28x", "20260728", "2026-13-45", "2026-02-30", "2099-01-01"]) {
   test(`authenticated tools/list with unknown older or malformed header '${v}' → 400 unsupported_protocol_version`, async () => {
     const { app, token } = await setup();
     const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
@@ -176,7 +176,7 @@ for (const v of ["2025-01-01", "2024-10-07", "1999-01-01", "latest", "2026-7-28"
 }
 
 // claude.ai and openai-mcp/1.0.0 send a newer version than we know on follow-up requests.
-for (const v of ["2026-07-28", "2099-01-01"]) {
+for (const v of ["2026-07-28"]) {
   test(`authenticated tools/list and tools/call with newer header ${v} → 200 (treated as newest)`, async () => {
     const { app, token } = await setup({ search: () => [] });
     const list = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
@@ -528,4 +528,33 @@ test("AUTH_DEBUG off: no tool_call lines", async () => {
   const { app, token } = await setup({ search: () => [] });
   const lines = await captureLog(() => request(app).post("/mcp").set("Authorization", `Bearer ${token}`).send(secretCall));
   assert.deepEqual(toolEvents(lines), []);
+});
+
+test("newer protocol header: real calendar date, at most 2 years ahead of the (injectable) clock", () => {
+  const now = Date.UTC(2026, 10, 18);
+  assert.equal(isAcceptedProtocolVersionHeader("2026-07-28", now), true);
+  assert.equal(isAcceptedProtocolVersionHeader("2028-11-18", now), true);
+  assert.equal(isAcceptedProtocolVersionHeader("2028-11-19", now), false);
+  assert.equal(isAcceptedProtocolVersionHeader("2099-01-01", now), false);
+  assert.equal(isAcceptedProtocolVersionHeader("2026-13-45", now), false);
+  assert.equal(isAcceptedProtocolVersionHeader("2026-02-30", now), false);
+  assert.equal(isAcceptedProtocolVersionHeader("2025-06-18", now), true);
+  assert.equal(isAcceptedProtocolVersionHeader("2025-01-01", now), false);
+  const later = Date.UTC(2040, 0, 1);
+  assert.equal(isAcceptedProtocolVersionHeader("2041-06-01", later), true);
+});
+
+test("tools/call with an unknown tool → JSON-RPC error -32602 Unknown tool", async () => {
+  const { app, token } = await setup();
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+    .send({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "no_such_tool", arguments: {} } });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body, { jsonrpc: "2.0", id: 5, error: { code: -32602, message: "Unknown tool: no_such_tool" } });
+});
+
+test("unknown method still → -32601", async () => {
+  const { app, token } = await setup();
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+    .send({ jsonrpc: "2.0", id: 6, method: "no/such" });
+  assert.equal(res.body.error.code, -32601);
 });

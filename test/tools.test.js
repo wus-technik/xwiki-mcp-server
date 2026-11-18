@@ -139,11 +139,12 @@ test("callTool returns an isError result for non-auth errors", async () => {
   assert.equal(result.structuredContent, undefined);
 });
 
-test("callTool unknown tool returns an isError result", async () => {
+test("callTool unknown tool throws JSON-RPC -32602 Invalid params (no tool result)", async () => {
   const client = makeClient();
-  const result = await callTool("unknown_tool", {}, SESSION, client);
-  assert.equal(result.isError, true);
-  assert.ok(result.content[0].text.includes("Unknown tool"));
+  await assert.rejects(
+    () => callTool("unknown_tool", {}, SESSION, client),
+    (e) => e.code === -32602 && e.message === "Unknown tool: unknown_tool",
+  );
 });
 
 // --- structuredContent / outputSchema / annotations (MCP 2025-06-18+) -----------------------

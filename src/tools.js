@@ -212,7 +212,11 @@ function pageResult(page) {
 
 // Returns a CallToolResult. Tool failures are results with isError: true; an XWikiAuthError
 // propagates, because the /mcp handler ends the session or retries with a renewed token.
+// An unknown tool name is a protocol error (JSON-RPC -32602 Invalid params), not a tool result.
 export async function callTool(name, args, sessionCtx, xwikiClient, toolConfig = {}) {
+  if (!TOOLS.some((t) => t.name === name)) {
+    throw Object.assign(new Error(`Unknown tool: ${String(name).slice(0, 100)}`), { code: -32602, rpcMessage: true });
+  }
   try {
     if (name === "search_xwiki") {
       const { query, limit = 10, include_headings = false } = args;
@@ -268,7 +272,7 @@ export async function callTool(name, args, sessionCtx, xwikiClient, toolConfig =
         expiresInSeconds: Math.round((payload.exp - Date.now()) / 1000),
       });
     }
-    return textResult(`Unknown tool: ${name}`, true);
+    throw new Error(`Unhandled tool: ${name}`);
   } catch (e) {
     if (e instanceof XWikiAuthError) throw e;
     return textResult(`Error: ${e.message}`, true);

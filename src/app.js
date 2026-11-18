@@ -60,7 +60,7 @@ export function createApp(overrides = {}) {
   // version newer than our newest is tolerated (see isAcceptedProtocolVersionHeader).
   const versionGuard = (req, res, next) => {
     const version = req.headers["mcp-protocol-version"];
-    if (version !== undefined && !isAcceptedProtocolVersionHeader(version) && req.body?.method !== "initialize") {
+    if (version !== undefined && !isAcceptedProtocolVersionHeader(version, now()) && req.body?.method !== "initialize") {
       authDebugLogger.warn("protocol_version_rejected", req, { protocolVersion: /^[\w.-]{1,32}$/.test(version) ? version : "<invalid>" });
       return res.status(400).json({ error: "unsupported_protocol_version", supported: SUPPORTED_PROTOCOL_VERSIONS });
     }
@@ -202,7 +202,9 @@ export function createApp(overrides = {}) {
       outcome = await runWithXWikiAuth(req, (ctx) => handleMcpRequest(method, params, ctx, xwikiClient, toolConfig));
     } catch (e) {
       if (isToolCall) logToolCall(req, params, startedAt, /^\w{1,64}$/.test(e?.name || "") ? e.name : "Error");
-      return res.json({ jsonrpc: "2.0", id, error: { code: e.code || -32600, message: "Internal error" } });
+      // Protocol errors meant for the client (e.g. -32602 Unknown tool) keep their message.
+      const message = e?.rpcMessage === true ? e.message : "Internal error";
+      return res.json({ jsonrpc: "2.0", id, error: { code: e.code || -32600, message } });
     }
     if (isToolCall) {
       const kind = outcome.unauthorized ? "xwiki_auth" : outcome.result?.isError ? "tool_error" : "ok";
