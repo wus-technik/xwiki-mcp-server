@@ -32,10 +32,28 @@ export function createApp(overrides = {}) {
   });
 
   const app = express();
+  const authDebugLogger = createAuthDebugLogger(cfg.authDebug);
+  // Transport checks for POST /mcp (and /mcp/), mounted BEFORE the body parsers and the token
+  // check, so a refused Origin or version wins over a malformed body or a missing token.
+  // Origin: only browsers send it; a present Origin outside the allowlist is refused
+  // (DNS-rebinding protection of the MCP spec).
+  const transportGuard = (req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin !== undefined && !isAllowedOrigin(origin, cfg.mcpBaseUrl, cfg.extraOrigins || [])) {
+      authDebugLogger.warn("origin_rejected", req);
+      return res.status(403).json({ error: "forbidden_origin" });
+    }
+    const version = req.headers["mcp-protocol-version"];
+    if (version !== undefined && !SUPPORTED_PROTOCOL_VERSIONS.includes(version)) {
+      return res.status(400).json({ error: "unsupported_protocol_version", supported: SUPPORTED_PROTOCOL_VERSIONS });
+    }
+    next();
+  };
+
+  app.post("/mcp", transportGuard);
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
   app.use(cookieParser());
-  const authDebugLogger = createAuthDebugLogger(cfg.authDebug);
 
   const authentik = overrides.authentik || createAuthentik({
     issuer: cfg.authentikIssuer || "",
@@ -67,21 +85,6 @@ export function createApp(overrides = {}) {
 
   const deps = app.locals.deps;
   const authMiddleware = createAuthMiddleware({ ...deps, logger: authDebugLogger });
-
-  // Transport checks run before the token check. Origin: only browsers send it; a present
-  // Origin outside the allowlist is refused (DNS-rebinding protection of the MCP spec).
-  const transportGuard = (req, res, next) => {
-    const origin = req.headers.origin;
-    if (origin !== undefined && !isAllowedOrigin(origin, cfg.mcpBaseUrl, cfg.extraOrigins || [])) {
-      authDebugLogger.warn("origin_rejected", req);
-      return res.status(403).json({ error: "forbidden_origin" });
-    }
-    const version = req.headers["mcp-protocol-version"];
-    if (version !== undefined && !SUPPORTED_PROTOCOL_VERSIONS.includes(version)) {
-      return res.status(400).json({ error: "unsupported_protocol_version", supported: SUPPORTED_PROTOCOL_VERSIONS });
-    }
-    next();
-  };
 
   // XWikiAuthError handling. XWiki rejected the session's token. Under `session:<sid>`:
   //  - session gone → 401 (someone else ended it);
@@ -134,8 +137,16 @@ export function createApp(overrides = {}) {
     .get((_req, res) => res.set("Allow", "POST").status(405).json({ error: "method_not_allowed" }))
     .delete((_req, res) => res.set("Allow", "POST").status(405).json({ error: "method_not_allowed" }));
 
-  mcpRouter.post("/", transportGuard, authMiddleware, async (req, res) => {
-    const { method, params, id } = req.body || {};
+  mcpRouter.post("/", authMiddleware, async (req, res) => {
+    const body = req.body;
+    // No batching: an array (or any non-object body) is an invalid request.
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return res.status(400).json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } });
+    }
+    // Without an id the message is a notification (notifications/initialized, cancelled,
+    // progress, ...): acknowledged with 202 and no body, never dispatched, never an error.
+    if (!Object.hasOwn(body, "id")) return res.status(202).end();
+    const { method, params, id } = body;
     const toolConfig = { sessionSecret: cfg.sessionSecret, mcpBaseUrl: cfg.mcpBaseUrl };
 
     let outcome;
@@ -152,11 +163,7 @@ export function createApp(overrides = {}) {
     }
 
     const { result } = outcome;
-    if (result === null) {
-      if (id === undefined) return res.status(202).end();
-      return res.json({ jsonrpc: "2.0", id });
-    }
-    res.json({ jsonrpc: "2.0", id, result });
+    res.json({ jsonrpc: "2.0", id, result: result ?? {} });
   });
 
   // Not wrapped with authMiddleware: a bare `curl -T` can't send a Bearer token.

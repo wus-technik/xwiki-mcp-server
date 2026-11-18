@@ -61,6 +61,44 @@ test("missing Authorization header → 401 with resource_metadata", async () => 
   assertChallenge(await request(protectedApp(deps)).get("/protected"));
 });
 
+test("empty Authorization header → 401 without error code", async () => {
+  const { deps } = await setup();
+  const h = assertChallenge(await request(protectedApp(deps)).get("/protected").set("Authorization", ""));
+  assert.doesNotMatch(h, /error=/);
+});
+
+test("missing Authorization header → challenge without error code", async () => {
+  const { deps } = await setup();
+  const h = assertChallenge(await request(protectedApp(deps)).get("/protected"));
+  assert.doesNotMatch(h, /error=/);
+});
+
+test("scheme is case-insensitive: 'bearer <token>' is accepted", async () => {
+  const { deps, sid } = await setup();
+  const token = await sign({ sub: "sub-1", sid, client_id: CID, ver: 1 });
+  for (const scheme of ["bearer", "BEARER", "Bearer"]) {
+    const res = await request(protectedApp(deps)).get("/protected").set("Authorization", `${scheme} ${token}`);
+    assert.equal(res.status, 200, scheme);
+  }
+});
+
+for (const value of ["Basic dXNlcjpwYXNz", "Bearer", "Bearer ", "Bearer    ", "Token abc", "garbage"]) {
+  test(`present but unusable Authorization '${value}' → 401 invalid_token`, async () => {
+    const { deps } = await setup();
+    const res = await request(protectedApp(deps)).get("/protected").set("Authorization", value);
+    assert.match(assertChallenge(res), /error="invalid_token"/);
+  });
+}
+
+test("non-string sid claim → 401 invalid_token", async () => {
+  const { deps } = await setup();
+  for (const sid of [123, { a: 1 }, ["x"]]) {
+    const token = await sign({ sub: "sub-1", sid, client_id: CID, ver: 1 });
+    const res = await request(protectedApp(deps)).get("/protected").set("Authorization", `Bearer ${token}`);
+    assert.match(assertChallenge(res), /error="invalid_token"/);
+  }
+});
+
 test("malformed token → 401 invalid_token", async () => {
   const { deps } = await setup();
   const res = await request(protectedApp(deps)).get("/protected").set("Authorization", "Bearer not-a-jwt");

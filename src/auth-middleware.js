@@ -40,16 +40,22 @@ export function createAuthMiddleware(deps) {
   const reject = (res) => sendUnauthorized(res, cfg, { error: "invalid_token" });
 
   return async (req, res, next) => {
-    const auth = req.headers.authorization || "";
-    if (!auth.startsWith("Bearer ")) {
+    const auth = typeof req.headers.authorization === "string" ? req.headers.authorization.trim() : "";
+    if (!auth) {
       logger?.info("missing_bearer", req);
       // RFC 6750 §3.1: no error code when the request carries no credentials at all.
       return sendUnauthorized(res, cfg, { description: "Bearer token required" });
     }
+    // Scheme is case-insensitive (RFC 7235); any other scheme or an empty token is invalid.
+    const m = /^bearer +(\S+)$/i.exec(auth);
+    if (!m) {
+      logger?.warn("invalid_authorization", req);
+      return reject(res);
+    }
 
     let payload;
     try {
-      ({ payload } = await jwtVerify(auth.slice(7), secret, {
+      ({ payload } = await jwtVerify(m[1], secret, {
         algorithms: ["HS256"],
         issuer: base,
         audience: base,

@@ -115,6 +115,55 @@ test("Origin: evil → 403; none → 200; claude.ai → 200; MCP origin → 200;
   assert.equal((await send("https://extra.example")).status, 200);
 });
 
+for (const origin of ["https://CLAUDE.AI", "https://claude.ai/", "null", "https://claude.ai.evil.example", "http://claude.ai"]) {
+  test(`Origin edge case '${origin}' → 403`, async () => {
+    const { app, token } = await setup();
+    const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+      .set("Origin", origin).send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    assert.equal(res.status, 403);
+  });
+}
+
+test("bad Origin with a malformed body → 403 (checked before the body parser)", async () => {
+  const { app, token } = await setup();
+  for (const p of ["/mcp", "/mcp/"]) {
+    const res = await request(app).post(p).set("Authorization", `Bearer ${token}`)
+      .set("Origin", "https://evil.example").set("Content-Type", "application/json").send("{not json");
+    assert.equal(res.status, 403, p);
+    assert.equal(res.body.error, "forbidden_origin");
+  }
+});
+
+test("unsupported MCP-Protocol-Version with a malformed body → 400 version error (before the parser)", async () => {
+  const { app, token } = await setup();
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+    .set("MCP-Protocol-Version", "1999-01-01").set("Content-Type", "application/json").send("{not json");
+  assert.equal(res.status, 400);
+  assert.equal(res.body.error, "unsupported_protocol_version");
+});
+
+// --- JSON-RPC envelope -------------------------------------------------------------------
+
+for (const method of ["notifications/initialized", "notifications/cancelled", "notifications/progress", "tools/call", "unknown/thing"]) {
+  test(`message without id (${method}) → 202 with empty body, nothing dispatched`, async () => {
+    const { app, token, calls } = await setup();
+    const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+      .send({ jsonrpc: "2.0", method, params: { name: "search_xwiki", arguments: { query: "x" } } });
+    assert.equal(res.status, 202);
+    assert.equal(res.text, "");
+    assert.deepEqual(calls, []);
+  });
+}
+
+test("batch (array body) → 400 JSON-RPC -32600 Invalid Request with id null", async () => {
+  const { app, token, calls } = await setup();
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+    .send([{ jsonrpc: "2.0", id: 1, method: "tools/list" }, searchCall]);
+  assert.equal(res.status, 400);
+  assert.deepEqual(res.body, { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } });
+  assert.deepEqual(calls, []);
+});
+
 test("bad Origin is rejected before the token check (no 401)", async () => {
   const { app } = await setup();
   const res = await request(app).post("/mcp").set("Origin", "https://evil.example").send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
