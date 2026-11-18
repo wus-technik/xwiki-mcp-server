@@ -188,6 +188,8 @@ Gets the content of an XWiki page.
 - `content_offset` (optional): Character offset applied after any heading extraction
 - `content_length` (optional): Maximum number of characters to return after any heading extraction
 
+**Result:** a JSON object (as `structuredContent` and as JSON text) with the page body in `page_content` (not `content`: ChatGPT renders results containing a `content` key as `{}`), plus `title`, `author`, `modified`, `syntax`, the slice fields `contentOffset`, `contentLength`, `totalContentLength`, `contentTruncated`, `sourceContentLength` and the heading fields `headingMatched`, `headingOccurrence`, `headingLevel`.
+
 **Example:**
 ```json
 {

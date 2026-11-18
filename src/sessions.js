@@ -110,7 +110,8 @@ export class TokenError extends Error {
   }
 }
 
-const invalidGrant = () => new TokenError("invalid_grant");
+// `reason` is a short code for the AUTH_DEBUG log (refresh_rejected); never sent to clients.
+const invalidGrant = (reason) => Object.assign(new TokenError("invalid_grant"), reason ? { reason } : {});
 const lockKey = (sid) => `session:${sid}`;
 const replayAad = (familyId) => `family:${familyId}:replay`;
 export const hashRefreshToken = (rt) => createHash("sha256").update(rt).digest("hex");
@@ -538,15 +539,17 @@ function findFamily(state, hash) {
 }
 
 // Maps Authentik errors: rejected → session ends; unavailable → 503 (MCP tokens unchanged).
-async function authentikStep(deps, sid, fn) {
+async function authentikStep(deps, sid, fn, rejectedReason = "authentik_rejected") {
   try {
     return await fn();
   } catch (e) {
     if (e instanceof AuthentikRejected) {
       await endSession(deps, sid, "authentik-rejected");
-      throw invalidGrant();
+      throw invalidGrant(rejectedReason);
     }
-    if (e instanceof AuthentikUnavailable) throw new TokenError("temporarily_unavailable", 503);
+    if (e instanceof AuthentikUnavailable) {
+      throw Object.assign(new TokenError("temporarily_unavailable", 503), { reason: "authentik_unavailable" });
+    }
     throw e;
   }
 }
@@ -563,19 +566,40 @@ async function authentikStep(deps, sid, fn) {
 // Remaining limitation: if that small write itself fails after Authentik rotated, the server
 // keeps the spent Authentik token and the next refresh ends the session with
 // "authentik-rejected".
+//
+// AUTH_DEBUG (deps.logger): token_refreshed (short sid, replay flag) or refresh_rejected
+// (OAuth error code plus a reason code). Never tokens.
 export async function refreshSession(deps, { refreshToken, clientId }) {
+  const trace = { sid: null, replay: false };
+  try {
+    const response = await rotateRefreshToken(deps, { refreshToken, clientId }, trace);
+    deps.logger?.info("token_refreshed", undefined, { sid: trace.sid.slice(0, 8), replay: trace.replay });
+    return response;
+  } catch (e) {
+    const isTokenError = e instanceof TokenError;
+    deps.logger?.[isTokenError && e.status < 500 ? "info" : "warn"]("refresh_rejected", undefined, {
+      error: isTokenError ? e.code : "server_error",
+      reason: isTokenError ? e.reason || e.code : /^\w{1,64}$/.test(e?.name || "") ? e.name : "error",
+      ...(trace.sid ? { sid: trace.sid.slice(0, 8) } : {}),
+    });
+    throw e;
+  }
+}
+
+async function rotateRefreshToken(deps, { refreshToken, clientId }, trace) {
   const { store, authentik } = deps;
-  if (typeof refreshToken !== "string" || !refreshToken) throw invalidGrant();
+  if (typeof refreshToken !== "string" || !refreshToken) throw invalidGrant("unknown_token");
   const hash = hashRefreshToken(refreshToken);
   const found = findFamily(store.read(), hash);
-  if (!found) throw invalidGrant();
+  if (!found) throw invalidGrant("unknown_token");
   const { familyId, sid } = found;
+  trace.sid = sid;
 
   return store.withLock(lockKey(sid), async () => {
     let state = store.read();
     const family = state.families[familyId];
     let session = state.sessions[sid];
-    if (!family || !session || family.sid !== sid) throw invalidGrant();
+    if (!family || !session || family.sid !== sid) throw invalidGrant("session_gone");
     // Public client ids carry no security value; the binding is the refresh token itself.
     // Step 2 (checked wherever tokens would be handed out): client_id is optional for
     // public clients (RFC 6749 §6); if sent it must match the family.
@@ -589,20 +613,22 @@ export async function refreshSession(deps, { refreshToken, clientId }) {
     // window is closed (reuse as well).
     if (family.currentHash !== hash) {
       if (family.replay?.hash === hash && start < family.replay.until) {
-        if (!clientOk) throw invalidGrant();
+        if (!clientOk) throw invalidGrant("client_mismatch");
+        trace.replay = true;
         return JSON.parse(store.openField(family.replay.responseSealed, replayAad(familyId)));
       }
       if (family.replay?.hash === hash || (family.spentHashes || []).includes(hash)) {
         await endSession(deps, sid, "refresh-reuse");
+        throw invalidGrant("reuse");
       }
-      throw invalidGrant();
+      throw invalidGrant("stale_token");
     }
-    if (!clientOk) throw invalidGrant();
+    if (!clientOk) throw invalidGrant("client_mismatch");
 
     // Step 3: 30 days without a client refresh.
     if (start - session.lastClientRefreshAt > IDLE_MS) {
       await endSession(deps, sid, "idle");
-      throw invalidGrant();
+      throw invalidGrant("idle");
     }
 
     // Step 4: Authentik refresh and group check.
@@ -613,10 +639,10 @@ export async function refreshSession(deps, { refreshToken, clientId }) {
     const authentikRefreshSealed = store.sealField(ak.refreshToken, sealAad(sid, "authentikRefresh"));
     await store.mutate((draft) => {
       const s = draft.sessions[sid];
-      if (!s) throw invalidGrant();
+      if (!s) throw invalidGrant("session_gone");
       s.authentikRefreshSealed = authentikRefreshSealed;
     });
-    await authentikStep(deps, sid, () => authentik.checkUser(ak.accessToken));
+    await authentikStep(deps, sid, () => authentik.checkUser(ak.accessToken), "user_rejected");
 
     // Step 5: XWiki token renewal (Task 10); never fails the refresh.
     if (session.tokenExpiresAt - start < RENEW_BEFORE_MS) {
@@ -627,7 +653,7 @@ export async function refreshSession(deps, { refreshToken, clientId }) {
       }
       state = store.read();
       session = state.sessions[sid];
-      if (!session || !state.families[familyId]) throw invalidGrant();
+      if (!session || !state.families[familyId]) throw invalidGrant("session_gone");
     }
 
     // Step 6: one write for the whole rotation; the answer leaves only after it.
@@ -638,7 +664,7 @@ export async function refreshSession(deps, { refreshToken, clientId }) {
     await store.mutate((draft) => {
       const s = draft.sessions[sid];
       const f = draft.families[familyId];
-      if (!s || !f || f.currentHash !== hash) throw invalidGrant();
+      if (!s || !f || f.currentHash !== hash) throw invalidGrant("rotated_concurrently");
       s.lastClientRefreshAt = now;
       f.spentHashes = [...(f.spentHashes || []), hash].slice(-MAX_SPENT);
       f.currentHash = hashRefreshToken(newToken);

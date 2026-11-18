@@ -9,7 +9,7 @@ import { createAuthentik } from "./authentik.js";
 import { createXWikiTokens } from "./xwiki-tokens.js";
 import { createXWikiClient, XWikiAuthError } from "./xwiki-client.js";
 import { createUploadRouter } from "./upload-route.js";
-import { handleMcpRequest, SUPPORTED_PROTOCOL_VERSIONS } from "./mcp-handler.js";
+import { handleMcpRequest, SUPPORTED_PROTOCOL_VERSIONS, isAcceptedProtocolVersionHeader } from "./mcp-handler.js";
 import { sendUnauthorized } from "./metadata.js";
 import { isAllowedOrigin } from "./redirects.js";
 import { endSession } from "./sessions.js";
@@ -56,10 +56,11 @@ export function createApp(overrides = {}) {
     next();
   };
   // After auth: a present but unsupported MCP-Protocol-Version header is refused with 400,
-  // except for `initialize`, which negotiates the version in its body.
+  // except for `initialize`, which negotiates the version in its body. A well-formed date
+  // version newer than our newest is tolerated (see isAcceptedProtocolVersionHeader).
   const versionGuard = (req, res, next) => {
     const version = req.headers["mcp-protocol-version"];
-    if (version !== undefined && !SUPPORTED_PROTOCOL_VERSIONS.includes(version) && req.body?.method !== "initialize") {
+    if (version !== undefined && !isAcceptedProtocolVersionHeader(version, now()) && req.body?.method !== "initialize") {
       authDebugLogger.warn("protocol_version_rejected", req, { protocolVersion: /^[\w.-]{1,32}$/.test(version) ? version : "<invalid>" });
       return res.status(400).json({ error: "unsupported_protocol_version", supported: SUPPORTED_PROTOCOL_VERSIONS });
     }
@@ -149,6 +150,29 @@ export function createApp(overrides = {}) {
     }
   };
 
+  // AUTH_DEBUG: one tool_call line per tools/call. Only names, lengths and the outcome
+  // (ok / tool_error / xwiki_auth / exception class) — never argument values or result text.
+  const logToolCall = (req, params, startedAt, outcome, result) => {
+    const name = params?.name;
+    let argsLength = 0;
+    try {
+      argsLength = JSON.stringify(params?.arguments ?? {}).length;
+    } catch {
+      argsLength = -1;
+    }
+    const resultLength = Array.isArray(result?.content)
+      ? result.content.reduce((n, c) => n + (typeof c?.text === "string" ? c.text.length : 0), 0)
+      : 0;
+    authDebugLogger.info("tool_call", req, {
+      tool: typeof name === "string" && /^[\w.-]{1,64}$/.test(name) ? name : "<invalid>",
+      argsLength,
+      resultLength,
+      durationMs: Date.now() - startedAt,
+      outcome,
+      sid: String(req.mcpSession?.sessionId || "").slice(0, 8),
+    });
+  };
+
   const mcpRouter = express.Router();
 
   mcpRouter.use(createOAuthRouter(h));
@@ -171,11 +195,20 @@ export function createApp(overrides = {}) {
     const { method, params, id } = body;
     const toolConfig = { sessionSecret: cfg.sessionSecret, mcpBaseUrl: cfg.mcpBaseUrl };
 
+    const isToolCall = method === "tools/call";
+    const startedAt = Date.now();
     let outcome;
     try {
       outcome = await runWithXWikiAuth(req, (ctx) => handleMcpRequest(method, params, ctx, xwikiClient, toolConfig));
     } catch (e) {
-      return res.json({ jsonrpc: "2.0", id, error: { code: e.code || -32600, message: "Internal error" } });
+      if (isToolCall) logToolCall(req, params, startedAt, /^\w{1,64}$/.test(e?.name || "") ? e.name : "Error");
+      // Protocol errors meant for the client (e.g. -32602 Unknown tool) keep their message.
+      const message = e?.rpcMessage === true ? e.message : "Internal error";
+      return res.json({ jsonrpc: "2.0", id, error: { code: e.code || -32600, message } });
+    }
+    if (isToolCall) {
+      const kind = outcome.unauthorized ? "xwiki_auth" : outcome.result?.isError ? "tool_error" : "ok";
+      logToolCall(req, params, startedAt, kind, outcome.result);
     }
     if (outcome.unauthorized) {
       return sendUnauthorized(res, cfg, {

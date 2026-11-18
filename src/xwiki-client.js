@@ -11,6 +11,8 @@ export class XWikiAuthError extends Error {
 }
 
 const DEFAULT_SYNTAX = "markdown/1.2";
+// XWiki REST search scopes (/rest/wikis/{wiki}/search?scope=...); the default is content only.
+const SEARCH_SCOPES = ["name", "title", "content"];
 export const MAX_SOURCE_URL_BYTES = 50 * 1024 * 1024;
 const SOURCE_URL_TIMEOUT_MS = 30_000;
 const MAX_SOURCE_URL_REDIRECTS = 5;
@@ -276,12 +278,74 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch, s
     return null;
   }
 
-  function extractHeadings(content) {
+  // Per line: true if it belongs to a code block in BLOCK form, where "# comment" or "= x ="
+  // lines are code, not headings. Inline forms (a pair on one line, an opener after prose,
+  // an escaped ~{{code}}) mask nothing. Which block kinds apply depends on the page syntax:
+  //  - fenced blocks (``` / ~~~) only in Markdown (and unknown syntax). A backtick fence's
+  //    info string must not contain a backtick (CommonMark), so ```x``` is inline code.
+  //    Closed by a bare fence of the same character, at least as long.
+  //  - XWiki code macros in every syntax (XWiki Markdown 1.2 supports macros too): the opener
+  //    {{code ...}} starts the line (after optional whitespace), is not self-closing and not
+  //    closed on the same line; parameters are quote-aware (title="a}b"). The block ends with
+  //    the line containing {{/code}}.
+  //  - verbatim {{{ in XWiki syntax (and unknown syntax), not in Markdown: opener at line
+  //    start without }}} on the same line; ends with the line containing }}}.
+  const CODE_MACRO_OPENER = /^\s*\{\{code(?:\s(?:"(?:[^"\\]|\\.)*"|[^}"])*?)?(\/)?\}\}/;
+  function codeLineMask(lines, syntax) {
+    const s = typeof syntax === "string" ? syntax.toLowerCase() : "";
+    const markdown = s.startsWith("markdown");
+    const xwiki = s.startsWith("xwiki");
+    const fences = !xwiki;
+    const verbatim = !markdown;
+    const mask = [];
+    let fence = null; // { char, len } while inside a fenced block
+    let block = null; // "macro" | "verbatim" while inside an XWiki block
+    for (const line of lines) {
+      if (fence) {
+        mask.push(true);
+        const close = line.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+        if (close && close[1][0] === fence.char && close[1].length >= fence.len) fence = null;
+        continue;
+      }
+      if (block) {
+        mask.push(true);
+        if (line.includes(block === "macro" ? "{{/code}}" : "}}}")) block = null;
+        continue;
+      }
+      if (fences) {
+        const open = line.match(/^ {0,3}(?:(`{3,})[^`]*|(~{3,}).*)$/);
+        if (open) {
+          const run = open[1] || open[2];
+          fence = { char: run[0], len: run.length };
+          mask.push(true);
+          continue;
+        }
+      }
+      const macro = line.match(CODE_MACRO_OPENER);
+      if (macro && !macro[1] && !line.slice(macro[0].length).includes("{{/code}}")) {
+        block = "macro";
+        mask.push(true);
+        continue;
+      }
+      const v = verbatim ? line.match(/^\s*\{\{\{/) : null;
+      if (v && !line.slice(v[0].length).includes("}}}")) {
+        block = "verbatim";
+        mask.push(true);
+        continue;
+      }
+      mask.push(false);
+    }
+    return mask;
+  }
+
+  function extractHeadings(content, syntax) {
     const lines = String(content || "").split("\n");
+    const inCode = codeLineMask(lines, syntax);
     const occurrences = new Map();
     const headings = [];
 
-    for (const line of lines) {
+    for (const [i, line] of lines.entries()) {
+      if (inCode[i]) continue;
       const parsedHeading = parseHeadingLine(line);
       if (!parsedHeading) continue;
       const normalizedTitle = normalizeHeadingName(parsedHeading.title);
@@ -315,11 +379,12 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch, s
       : 1;
     const normalizedRequestedHeading = normalizeHeadingName(requestedHeading);
     const lines = String(content || "").split("\n");
+    const inCode = codeLineMask(lines, options.syntax);
     const headings = [];
     let cursor = 0;
 
-    for (const line of lines) {
-      const parsedHeading = parseHeadingLine(line);
+    for (const [i, line] of lines.entries()) {
+      const parsedHeading = inCode[i] ? null : parseHeadingLine(line);
       if (parsedHeading) {
         headings.push({
           ...parsedHeading,
@@ -461,12 +526,23 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch, s
   return {
     async search(query, limitOrOptions = 10, optionsOrSessionCtx = {}, maybeSessionCtx = {}) {
       const { limit, options, sessionCtx } = resolveSearchArgs(limitOrOptions, optionsOrSessionCtx, maybeSessionCtx);
-      const url = `${baseUrl}/rest/wikis/${wiki}/search?q=${encodeURIComponent(query)}&number=${limit}`;
+      // Page name and title as well as content: a search for "EdooboxMCP" must find
+      // IT.LLM.MCP.EdooboxMCP even if the word is not in the page body.
+      const scopes = SEARCH_SCOPES.map((s) => `&scope=${s}`).join("");
+      const url = `${baseUrl}/rest/wikis/${wiki}/search?q=${encodeURIComponent(query)}${scopes}&number=${limit}`;
       const res = await fetcher(url, { headers: authHeaders(sessionCtx) });
       if (res.status === 401) throw new XWikiAuthError("XWiki session expired. Please re-authenticate.");
       if (!res.ok) throw new Error(`XWiki search failed: ${res.status}`);
       const data = await res.json();
-      const results = (data.searchResults || []).map((r) => ({
+      // One page can match in several scopes: keep its first hit only, then cap at limit.
+      const seen = new Set();
+      const unique = (data.searchResults || []).filter((r) => {
+        const key = r.id || r.pageFullName || [r.space, r.pageName].filter(Boolean).join(".");
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).slice(0, Math.max(0, limit));
+      const results = unique.map((r) => ({
         title: r.title || r.pageName,
         space: r.space,
         pagePath: r.pageFullName || [r.space, r.pageName].filter(Boolean).join("."),
@@ -481,7 +557,7 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch, s
         const page = await fetchPageRecord(pagePath, sessionCtx);
         return {
           ...result,
-          headings: extractHeadings(page.content),
+          headings: extractHeadings(page.content, page.syntax),
         };
       }));
     },
@@ -489,7 +565,7 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch, s
     async getPage(pagePath, optionsOrSessionCtx = {}, maybeSessionCtx = {}) {
       const { options, sessionCtx } = resolveGetPageArgs(optionsOrSessionCtx, maybeSessionCtx);
       const page = await fetchPageRecord(pagePath, sessionCtx);
-      const section = extractSectionByHeading(page.content, options);
+      const section = extractSectionByHeading(page.content, { ...options, syntax: page.syntax });
       return {
         title: page.title,
         author: page.author,

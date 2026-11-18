@@ -53,7 +53,7 @@ function makeApp({ file, fsImpl, clock, opts = {}, calls }) {
   };
   const app = createApp({
     sessionSecret: SECRET, mcpBaseUrl: BASE, store, authentik, xwikiTokens,
-    now: () => clock.now, extraRedirectUris: [], authDebug: false,
+    now: () => clock.now, extraRedirectUris: [], authDebug: opts.authDebug === true,
   });
   return { app, store };
 }
@@ -487,4 +487,75 @@ test("Sichern des Authentik-RT scheitert -> 500, MCP-Token unveraendert", async 
   assert.equal(ctx.calls.checkUser.length, 1, "checkUser not reached after the failed write");
   ctx.failWrites(false);
   assert.deepEqual(ctx.store.read(), before);
+});
+
+// --- AUTH_DEBUG: refresh events --------------------------------------------------------------
+
+async function captureLog(fn) {
+  const lines = [];
+  const orig = { info: console.info, warn: console.warn };
+  console.info = (...a) => lines.push(a.join(" "));
+  console.warn = (...a) => lines.push(a.join(" "));
+  try { await fn(); } finally { Object.assign(console, orig); }
+  return lines;
+}
+const events = (lines, name) => lines.filter((l) => l.startsWith("[auth] ")).map((l) => JSON.parse(l.slice(7))).filter((e) => e.event === name);
+
+test("AUTH_DEBUG: erfolgreicher Refresh -> token_refreshed mit kurzer sid, ohne Tokens", async () => {
+  const ctx = await setup({ authDebug: true });
+  let first;
+  let r1;
+  const lines = await captureLog(async () => {
+    first = await login(ctx);
+    r1 = await refresh(ctx, first.refresh_token);
+  });
+  assert.equal(r1.status, 200);
+  const ev = events(lines, "token_refreshed");
+  assert.equal(ev.length, 1);
+  assert.equal(ev[0].sid, onlySession(ctx).sid.slice(0, 8));
+  const all = lines.join("\n");
+  for (const secret of [first.refresh_token, first.access_token, r1.body.refresh_token, r1.body.access_token, "AK-RT-0", "AK-RT-1"]) {
+    assert.ok(!all.includes(secret), "token in debug log");
+  }
+});
+
+test("AUTH_DEBUG: abgelehnte Refreshs -> refresh_rejected mit Grund, ohne Token", async () => {
+  const ctx = await setup({ authDebug: true });
+  const first = await login(ctx);
+  const unknown = "U".repeat(43);
+  const lines = await captureLog(async () => {
+    await refresh(ctx, unknown);
+    await refresh(ctx, first.refresh_token, CID2);
+    ctx.clock.now += 30 * DAY + 1;
+    await refresh(ctx, first.refresh_token);
+  });
+  const ev = events(lines, "refresh_rejected");
+  assert.deepEqual(ev.map((e) => [e.reason, e.error]), [
+    ["unknown_token", "invalid_grant"],
+    ["client_mismatch", "invalid_grant"],
+    ["idle", "invalid_grant"],
+  ]);
+  const all = lines.join("\n");
+  assert.ok(!all.includes(unknown) && !all.includes(first.refresh_token));
+});
+
+test("AUTH_DEBUG: Authentik-Ablehnung und -Ausfall -> refresh_rejected authentik_rejected / authentik_unavailable", async () => {
+  let mode = "down";
+  const ctx = await setup({
+    authDebug: true,
+    refresh: async () => {
+      if (mode === "down") throw new AuthentikUnavailable();
+      throw new AuthentikRejected();
+    },
+  });
+  const first = await login(ctx);
+  const lines = await captureLog(async () => {
+    await refresh(ctx, first.refresh_token);
+    mode = "rejected";
+    await refresh(ctx, first.refresh_token);
+  });
+  assert.deepEqual(events(lines, "refresh_rejected").map((e) => [e.reason, e.error]), [
+    ["authentik_unavailable", "temporarily_unavailable"],
+    ["authentik_rejected", "invalid_grant"],
+  ]);
 });

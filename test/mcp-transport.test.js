@@ -12,14 +12,14 @@ import { createApp } from "../src/app.js";
 import { openStore } from "../src/store.js";
 import { createSession, sealAad } from "../src/sessions.js";
 import { XWikiAuthError } from "../src/xwiki-client.js";
-import { handleMcpRequest } from "../src/mcp-handler.js";
+import { handleMcpRequest, isAcceptedProtocolVersionHeader } from "../src/mcp-handler.js";
 
 const KEY = Buffer.alloc(32, 5);
 const SECRET = "test-secret-32-chars-minimum-pad";
 const BASE = "https://xwiki.example.com/mcp";
 const CID = "client-1";
 
-async function setup({ search, extraOrigins = [] } = {}) {
+async function setup({ search, extraOrigins = [], authDebug = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-transport-"));
   const store = openStore({ file: path.join(dir, "s.json"), key: KEY });
   await store.mutate((s) => {
@@ -44,7 +44,7 @@ async function setup({ search, extraOrigins = [] } = {}) {
   };
   const app = createApp({
     sessionSecret: SECRET, mcpBaseUrl: BASE, store, xwikiClient, xwikiTokens,
-    authentik: {}, authDebug: false, extraOrigins, extraRedirectUris: [],
+    authentik: {}, authDebug, extraOrigins, extraRedirectUris: [],
   });
   const token = await new SignJWT({ sid, client_id: CID, ver: 1 })
     .setProtectedHeader({ alg: "HS256" }).setIssuer(BASE).setAudience(BASE).setSubject("sub-1")
@@ -70,12 +70,14 @@ test("initialize answers a supported requested version", async () => {
   }
 });
 
-test("initialize with an unknown or missing version answers 2025-06-18", async () => {
-  assert.equal((await handleMcpRequest("initialize", { protocolVersion: "1999-01-01" }, null, null)).protocolVersion, "2025-06-18");
-  assert.equal((await handleMcpRequest("initialize", undefined, null, null)).protocolVersion, "2025-06-18");
+test("initialize with an unknown or missing version answers the newest supported (2025-11-25)", async () => {
+  for (const v of ["1999-01-01", "2026-07-28", "garbage"]) {
+    assert.equal((await handleMcpRequest("initialize", { protocolVersion: v }, null, null)).protocolVersion, "2025-11-25", v);
+  }
+  assert.equal((await handleMcpRequest("initialize", undefined, null, null)).protocolVersion, "2025-11-25");
 });
 
-test("POST /mcp initialize with 2025-03-26 → 2025-03-26, with 1999-01-01 → 2025-06-18", async () => {
+test("POST /mcp initialize with 2025-03-26 → 2025-03-26, with 1999-01-01 → 2025-11-25", async () => {
   const { app, token } = await setup();
   const a = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
     .send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26" } });
@@ -83,7 +85,7 @@ test("POST /mcp initialize with 2025-03-26 → 2025-03-26, with 1999-01-01 → 2
   assert.equal(a.body.result.protocolVersion, "2025-03-26");
   const b = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
     .send({ jsonrpc: "2.0", id: 2, method: "initialize", params: { protocolVersion: "1999-01-01" } });
-  assert.equal(b.body.result.protocolVersion, "2025-06-18");
+  assert.equal(b.body.result.protocolVersion, "2025-11-25");
 });
 
 test("MCP-Protocol-Version header unsupported → 400; supported → 200", async () => {
@@ -146,13 +148,13 @@ for (const v of ["2099-01-01", "2025-11-25"]) {
   });
 }
 
-test("authenticated initialize with unknown header and protocolVersion → 200, negotiated 2025-06-18", async () => {
+test("authenticated initialize with unknown header and protocolVersion → 200, negotiated 2025-11-25", async () => {
   const { app, token } = await setup();
   const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
     .set("MCP-Protocol-Version", "2099-01-01")
     .send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2099-01-01" } });
   assert.equal(res.status, 200);
-  assert.equal(res.body.result.protocolVersion, "2025-06-18");
+  assert.equal(res.body.result.protocolVersion, "2025-11-25");
 });
 
 test("authenticated initialize with protocolVersion 2025-11-25 → 200, 2025-11-25", async () => {
@@ -163,13 +165,30 @@ test("authenticated initialize with protocolVersion 2025-11-25 → 200, 2025-11-
   assert.equal(res.body.result.protocolVersion, "2025-11-25");
 });
 
-test("authenticated tools/list with unsupported header → 400 unsupported_protocol_version", async () => {
-  const { app, token } = await setup();
-  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
-    .set("MCP-Protocol-Version", "2099-01-01").send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
-  assert.equal(res.status, 400);
-  assert.equal(res.body.error, "unsupported_protocol_version");
-});
+for (const v of ["2025-01-01", "2024-10-07", "1999-01-01", "latest", "2026-7-28", "2026-07-28x", "20260728", "2026-13-45", "2026-02-30", "2099-01-01"]) {
+  test(`authenticated tools/list with unknown older or malformed header '${v}' → 400 unsupported_protocol_version`, async () => {
+    const { app, token } = await setup();
+    const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+      .set("MCP-Protocol-Version", v).send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, "unsupported_protocol_version");
+  });
+}
+
+// claude.ai and openai-mcp/1.0.0 send a newer version than we know on follow-up requests.
+for (const v of ["2026-07-28"]) {
+  test(`authenticated tools/list and tools/call with newer header ${v} → 200 (treated as newest)`, async () => {
+    const { app, token } = await setup({ search: () => [] });
+    const list = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+      .set("MCP-Protocol-Version", v).send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    assert.equal(list.status, 200);
+    assert.ok(list.body.result.tools.length > 0);
+    const call = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+      .set("MCP-Protocol-Version", v).send(searchCall);
+    assert.equal(call.status, 200);
+    assert.deepEqual(call.body.result.structuredContent, { results: [] });
+  });
+}
 
 test("authenticated tools/list with 2025-11-25 header → 200", async () => {
   const { app, token } = await setup();
@@ -428,3 +447,114 @@ for (const method of ["head", "options"]) {
     assert.equal(res.status, 403);
   });
 }
+
+// --- tools/call result shape ---------------------------------------------------------------
+
+test("tools/call result carries structuredContent next to the text block", async () => {
+  const { app, token } = await setup({ search: () => [{ title: "A", space: "Main", url: "https://x/A" }] });
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`).send(searchCall);
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.result.structuredContent, { results: [{ title: "A", space: "Main", url: "https://x/A" }] });
+  assert.deepEqual(JSON.parse(res.body.result.content[0].text), [{ title: "A", space: "Main", url: "https://x/A" }]);
+  assert.equal(res.body.result.isError, undefined);
+});
+
+test("tools/call tool failure → result with isError: true", async () => {
+  const { app, token } = await setup({ search: () => { throw new Error("boom"); } });
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`).send(searchCall);
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.result, { content: [{ type: "text", text: "Error: boom" }], isError: true });
+});
+
+test("tools/list exposes title, annotations and outputSchema", async () => {
+  const { app, token } = await setup();
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`).send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  const get = res.body.result.tools.find((t) => t.name === "get_xwiki_page");
+  assert.equal(get.annotations.readOnlyHint, true);
+  assert.equal(get.outputSchema.type, "object");
+  assert.ok(get.title);
+});
+
+// --- AUTH_DEBUG: tool_call events ------------------------------------------------------------
+
+async function captureLog(fn) {
+  const lines = [];
+  const orig = { info: console.info, warn: console.warn };
+  console.info = (...a) => lines.push(a.join(" "));
+  console.warn = (...a) => lines.push(a.join(" "));
+  try { await fn(); } finally { Object.assign(console, orig); }
+  return lines;
+}
+const toolEvents = (lines) => lines.filter((l) => l.startsWith("[auth] ")).map((l) => JSON.parse(l.slice(7))).filter((e) => e.event === "tool_call");
+const SECRET_ARG = "SUPER-SECRET-ARGUMENT-VALUE-1234";
+const secretCall = { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "search_xwiki", arguments: { query: SECRET_ARG } } };
+
+test("AUTH_DEBUG tool_call ok: name, lengths, duration, short sid — never argument values or content", async () => {
+  const { app, token, sid } = await setup({ authDebug: true, search: () => [{ title: "RESULT-CONTENT-XYZ", url: "https://x/A" }] });
+  let res;
+  const lines = await captureLog(async () => {
+    res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`).send(secretCall);
+  });
+  assert.equal(res.status, 200);
+  const ev = toolEvents(lines);
+  assert.equal(ev.length, 1);
+  assert.equal(ev[0].tool, "search_xwiki");
+  assert.equal(ev[0].outcome, "ok");
+  assert.equal(ev[0].sid, sid.slice(0, 8));
+  assert.equal(ev[0].argsLength, JSON.stringify({ query: SECRET_ARG }).length);
+  assert.equal(ev[0].resultLength, res.body.result.content[0].text.length);
+  assert.equal(typeof ev[0].durationMs, "number");
+  const all = lines.join("\n");
+  assert.ok(!all.includes(SECRET_ARG), "argument value in debug log");
+  assert.ok(!all.includes("RESULT-CONTENT-XYZ"), "result content in debug log");
+});
+
+test("AUTH_DEBUG tool_call outcomes: tool_error, xwiki_auth", async () => {
+  const cases = [
+    [() => { throw new Error(`boom ${SECRET_ARG}`); }, "tool_error"],
+    [() => { throw new XWikiAuthError("expired"); }, "xwiki_auth"],
+  ];
+  for (const [search, outcome] of cases) {
+    const { app, token } = await setup({ authDebug: true, search });
+    const lines = await captureLog(() => request(app).post("/mcp").set("Authorization", `Bearer ${token}`).send(secretCall));
+    const ev = toolEvents(lines);
+    assert.equal(ev.length, 1, outcome);
+    assert.equal(ev[0].outcome, outcome);
+    assert.ok(!lines.join("\n").includes(SECRET_ARG), outcome);
+  }
+});
+
+test("AUTH_DEBUG off: no tool_call lines", async () => {
+  const { app, token } = await setup({ search: () => [] });
+  const lines = await captureLog(() => request(app).post("/mcp").set("Authorization", `Bearer ${token}`).send(secretCall));
+  assert.deepEqual(toolEvents(lines), []);
+});
+
+test("newer protocol header: real calendar date, at most 2 years ahead of the (injectable) clock", () => {
+  const now = Date.UTC(2026, 10, 18);
+  assert.equal(isAcceptedProtocolVersionHeader("2026-07-28", now), true);
+  assert.equal(isAcceptedProtocolVersionHeader("2028-11-18", now), true);
+  assert.equal(isAcceptedProtocolVersionHeader("2028-11-19", now), false);
+  assert.equal(isAcceptedProtocolVersionHeader("2099-01-01", now), false);
+  assert.equal(isAcceptedProtocolVersionHeader("2026-13-45", now), false);
+  assert.equal(isAcceptedProtocolVersionHeader("2026-02-30", now), false);
+  assert.equal(isAcceptedProtocolVersionHeader("2025-06-18", now), true);
+  assert.equal(isAcceptedProtocolVersionHeader("2025-01-01", now), false);
+  const later = Date.UTC(2040, 0, 1);
+  assert.equal(isAcceptedProtocolVersionHeader("2041-06-01", later), true);
+});
+
+test("tools/call with an unknown tool → JSON-RPC error -32602 Unknown tool", async () => {
+  const { app, token } = await setup();
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+    .send({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "no_such_tool", arguments: {} } });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body, { jsonrpc: "2.0", id: 5, error: { code: -32602, message: "Unknown tool: no_such_tool" } });
+});
+
+test("unknown method still → -32601", async () => {
+  const { app, token } = await setup();
+  const res = await request(app).post("/mcp").set("Authorization", `Bearer ${token}`)
+    .send({ jsonrpc: "2.0", id: 6, method: "no/such" });
+  assert.equal(res.body.error.code, -32601);
+});

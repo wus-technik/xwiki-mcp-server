@@ -739,3 +739,190 @@ test("the trusted-host exemption compares scheme-default ports", async () => {
     /disallowed internal\/private address/,
   );
 });
+
+// --- search scopes and dedupe ---------------------------------------------------------------
+
+test("search queries page name, title and content scopes and keeps the limit", async () => {
+  const fetcher = mockFetch(200, { searchResults: [] });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  await client.search("EdooboxMCP", 7, SESSION);
+  const url = new URL(fetcher.mock.calls[0].arguments[0]);
+  assert.equal(url.pathname, "/rest/wikis/xwiki/search");
+  assert.equal(url.searchParams.get("q"), "EdooboxMCP");
+  assert.deepEqual(url.searchParams.getAll("scope").sort(), ["content", "name", "title"]);
+  assert.equal(url.searchParams.get("number"), "7");
+});
+
+test("search dedupes results by page id (same page hit via name, title and content)", async () => {
+  const hit = { title: "EdooboxMCP", pageName: "WebHome", space: "IT.LLM.MCP.EdooboxMCP", pageFullName: "IT.LLM.MCP.EdooboxMCP.WebHome", id: "xwiki:IT.LLM.MCP.EdooboxMCP.WebHome" };
+  const other = { title: "Other", pageName: "WebHome", space: "IT.Other", pageFullName: "IT.Other.WebHome", id: "xwiki:IT.Other.WebHome" };
+  const fetcher = mockFetch(200, { searchResults: [hit, { ...hit }, other, { ...hit }] });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  const results = await client.search("EdooboxMCP", 10, SESSION);
+  assert.deepEqual(results.map((r) => r.title), ["EdooboxMCP", "Other"]);
+});
+
+test("search returns at most limit results after dedupe", async () => {
+  const mk = (n) => ({ title: `P${n}`, pageName: "WebHome", space: `S${n}`, pageFullName: `S${n}.WebHome`, id: `xwiki:S${n}.WebHome` });
+  const fetcher = mockFetch(200, { searchResults: [mk(1), mk(1), mk(2), mk(3), mk(4)] });
+  const client = createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+  const results = await client.search("p", 2, SESSION);
+  assert.deepEqual(results.map((r) => r.title), ["P1", "P2"]);
+});
+
+// --- headings inside code blocks ------------------------------------------------------------
+
+function pageClient(content) {
+  const fetcher = mock.fn(async (url) => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    json: async () => (url.includes("/search?")
+      ? { searchResults: [{ title: "Doc", pageName: "WebHome", space: "IT", pageFullName: "IT.WebHome" }] }
+      : { title: "Doc", content, author: "alice", modified: "2024-01-01" }),
+  }));
+  return createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+}
+
+const XWIKI_CODE_PAGE = [
+  "= Setup =",
+  "Run this:",
+  "{{code language=\"bash\"}}",
+  "# auf docker101",
+  "= not a heading =",
+  "{{/code}}",
+  "{{{",
+  "== verbatim ==",
+  "}}}",
+  "{{code}}# inline{{/code}}",
+  "= Next =",
+  "done",
+].join("\n");
+
+const MARKDOWN_CODE_PAGE = [
+  "# Setup",
+  "```bash",
+  "# auf docker101",
+  "```",
+  "~~~",
+  "## tilde comment",
+  "~~~",
+  "````",
+  "```",
+  "# still code",
+  "````",
+  "# Next",
+  "done",
+].join("\n");
+
+test("headings inside XWiki {{code}} and {{{ }}} blocks are ignored", async () => {
+  const [r] = await pageClient(XWIKI_CODE_PAGE).search("doc", 5, { includeHeadings: true }, SESSION);
+  assert.deepEqual(r.headings.map((h) => h.title), ["Setup", "Next"]);
+});
+
+test("headings inside fenced Markdown code blocks (``` and ~~~) are ignored", async () => {
+  const [r] = await pageClient(MARKDOWN_CODE_PAGE).search("doc", 5, { includeHeadings: true }, SESSION);
+  assert.deepEqual(r.headings.map((h) => h.title), ["Setup", "Next"]);
+});
+
+for (const [label, content] of [["XWiki", XWIKI_CODE_PAGE], ["Markdown", MARKDOWN_CODE_PAGE]]) {
+  test(`section extraction (${label}) runs across code blocks and cannot target a code comment`, async () => {
+    const client = pageClient(content);
+    const page = await client.getPage("IT.WebHome", { heading: "Setup" }, SESSION);
+    assert.ok(page.content.includes("# auf docker101"), "code block belongs to the section");
+    assert.ok(!page.content.includes("Next"), "section ends at the next real heading");
+    await assert.rejects(() => client.getPage("IT.WebHome", { heading: "auf docker101" }, SESSION), /Heading not found/);
+  });
+}
+
+// --- code block detection: self-closing macros, openers after prose, inline code, syntax ------
+
+function syntaxClient(content, syntax) {
+  const fetcher = mock.fn(async (url) => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    json: async () => (url.includes("/search?")
+      ? { searchResults: [{ title: "Doc", pageName: "WebHome", space: "IT", pageFullName: "IT.WebHome" }] }
+      : { title: "Doc", content, author: "alice", modified: "2024-01-01", ...(syntax ? { syntax } : {}) }),
+  }));
+  return createXWikiClient({ baseUrl: BASE_URL, wiki: WIKI, fetcher });
+}
+const headingTitles = async (content, syntax) =>
+  (await syntaxClient(content, syntax).search("doc", 5, { includeHeadings: true }, SESSION))[0].headings.map((h) => h.title);
+
+for (const syntax of ["xwiki/2.1", "markdown/1.2", undefined]) {
+  test(`self-closing {{code .../}} opens no block (${syntax || "no syntax"})`, async () => {
+    const content = ["= Before =", "{{code language=\"bash\" source=\"string:echo x\"/}}", "= Later =", "text"].join("\n");
+    assert.deepEqual(await headingTitles(content, syntax), ["Before", "Later"]);
+  });
+
+  test(`block {{code}} at line start, {{/code}} closing mid-line (${syntax || "no syntax"})`, async () => {
+    const content = [
+      "= Before =",
+      "  {{code language=\"bash\"}}",
+      "= inside =",
+      "# auf docker101",
+      "echo done {{/code}} and more prose",
+      "= After =",
+    ].join("\n");
+    assert.deepEqual(await headingTitles(content, syntax), ["Before", "After"]);
+  });
+
+  test(`{{code}} after prose is inline, not a block: nothing is masked (${syntax || "no syntax"})`, async () => {
+    const content = ["= Before =", "Run: {{code}}", "= Visible =", "{{/code}}", "= After ="].join("\n");
+    assert.deepEqual(await headingTitles(content, syntax), ["Before", "Visible", "After"]);
+  });
+
+  test(`escaped ~{{code}} opens no block (${syntax || "no syntax"})`, async () => {
+    const content = ["= Before =", "Write ~{{code}} to start", "~{{code}}", "= After =", "text"].join("\n");
+    assert.deepEqual(await headingTitles(content, syntax), ["Before", "After"]);
+  });
+
+  test(`{{code title="a}b"}} block hides its content (quote-aware params) (${syntax || "no syntax"})`, async () => {
+    const content = ["= Before =", "{{code title=\"a}b\" language=\"bash\"}}", "= hidden =", "# hidden too", "{{/code}}", "= After ="].join("\n");
+    assert.deepEqual(await headingTitles(content, syntax), ["Before", "After"]);
+  });
+}
+
+for (const syntax of ["markdown/1.2", undefined]) {
+  test(`\`\`\`inline\`\`\` code span on its own line is not a fence (${syntax || "no syntax"})`, async () => {
+    const content = ["# Before", "```example```", "# Real", "text", "~~~ info with ` backtick", "# in tilde fence", "~~~", "# End"].join("\n");
+    assert.deepEqual(await headingTitles(content, syntax), ["Before", "Real", "End"]);
+  });
+}
+
+test("xwiki/2.1 page: a bare ``` line is no fence, later = … = headings stay", async () => {
+  const content = ["= One =", "```", "= Two =", "text", "= Three ="].join("\n");
+  assert.deepEqual(await headingTitles(content, "xwiki/2.1"), ["One", "Two", "Three"]);
+  const page = await syntaxClient(content, "xwiki/2.1").getPage("IT.WebHome", { heading: "Two" }, SESSION);
+  assert.equal(page.content, "= Two =\ntext");
+});
+
+test("markdown/1.2 page: ``` fence still hides # comments; section extraction uses the syntax", async () => {
+  const content = ["# One", "```", "# comment", "```", "# Two", "text"].join("\n");
+  assert.deepEqual(await headingTitles(content, "markdown/1.2"), ["One", "Two"]);
+  const page = await syntaxClient(content, "markdown/1.2").getPage("IT.WebHome", { heading: "One" }, SESSION);
+  assert.ok(page.content.includes("# comment"));
+});
+
+test("xwiki/2.1: inline {{code}}…{{/code}} and {{{…}}} inside heading lines keep the headings", async () => {
+  const content = [
+    "= Example {{code}}hello{{/code}} =",
+    "text one",
+    "= Using {{{foo}}} =",
+    "text two",
+    "= Last =",
+  ].join("\n");
+  assert.deepEqual(await headingTitles(content, "xwiki/2.1"), ["Example {{code}}hello{{/code}}", "Using {{{foo}}}", "Last"]);
+  const client = syntaxClient(content, "xwiki/2.1");
+  const a = await client.getPage("IT.WebHome", { heading: "Example {{code}}hello{{/code}}" }, SESSION);
+  assert.equal(a.content, "= Example {{code}}hello{{/code}} =\ntext one");
+  const b = await client.getPage("IT.WebHome", { heading: "Using {{{foo}}}" }, SESSION);
+  assert.equal(b.content, "= Using {{{foo}}} =\ntext two");
+});
+
+test("xwiki/2.1: {{{ verbatim block at line start hides its content until }}}", async () => {
+  const content = ["= One =", "{{{", "= hidden =", "end }}} tail", "= Two ="].join("\n");
+  assert.deepEqual(await headingTitles(content, "xwiki/2.1"), ["One", "Two"]);
+});
