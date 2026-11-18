@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { callTool, TOOLS } from "../src/tools.js";
 import { XWikiAuthError } from "../src/xwiki-client.js";
 
-const SESSION = { userId: "alice", xwikiCookie: "XWIKI_SESSION=abc" };
+const SESSION = { sessionId: "s1", userId: "alice", xwikiUser: "XWiki.alice", xwikiToken: "tok", tokenVersion: 1 };
 
 function makeClient(overrides = {}) {
   return {
