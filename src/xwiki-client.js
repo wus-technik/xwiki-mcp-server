@@ -1,4 +1,7 @@
-import { lookup } from "node:dns/promises";
+import http from "node:http";
+import https from "node:https";
+import { isIP } from "node:net";
+import { lookup as dnsLookup } from "node:dns/promises";
 
 export class XWikiAuthError extends Error {
   constructor(message) {
@@ -10,36 +13,103 @@ export class XWikiAuthError extends Error {
 const DEFAULT_SYNTAX = "markdown/1.2";
 export const MAX_SOURCE_URL_BYTES = 50 * 1024 * 1024;
 const SOURCE_URL_TIMEOUT_MS = 30_000;
+const MAX_SOURCE_URL_REDIRECTS = 5;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const DISALLOWED_ADDRESS = "source_url resolves to a disallowed internal/private address";
+const TOO_LARGE = `source_url content exceeds maximum allowed size (${MAX_SOURCE_URL_BYTES} bytes)`;
 
-// ponytail: covers the common private/loopback/link-local ranges (including the
-// 169.254.169.254 cloud metadata address); exotic ranges (e.g. 100.64.0.0/10 CGNAT)
-// are not covered, add if a real target needs it.
-function isDisallowedIp(ip) {
-  if (ip.includes(":")) {
-    const lower = ip.toLowerCase();
-    if (lower === "::1") return true; // loopback
-    if (lower.startsWith("::ffff:") && lower.slice(7).includes(".")) {
-      return isDisallowedIp(lower.slice(7));
-    }
-    const firstGroup = parseInt(lower.split(":")[0] || "0", 16);
-    if (firstGroup >= 0xfe80 && firstGroup <= 0xfebf) return true; // link-local
-    if (firstGroup >= 0xfc00 && firstGroup <= 0xfdff) return true; // unique local (private)
-    return false;
+// [network, prefix length] — loopback, private, CGNAT, link-local (incl. cloud metadata),
+// "this network", IETF protocol assignments, benchmarking, multicast, reserved/broadcast.
+const IPV4_BLOCKED = [
+  ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16],
+  ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15],
+  ["224.0.0.0", 4], ["240.0.0.0", 4],
+];
+
+function ipv4ToInt(ip) {
+  const parts = String(ip).split(".");
+  if (parts.length !== 4) return null;
+  let n = 0;
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part) || Number(part) > 255) return null;
+    n = n * 256 + Number(part);
   }
-  const octets = ip.split(".").map(Number);
-  if (octets.length !== 4 || octets.some((n) => !Number.isInteger(n))) return true; // malformed, reject
-  const [a, b] = octets;
-  if (a === 127) return true; // loopback
-  if (a === 10) return true; // private
-  if (a === 172 && b >= 16 && b <= 31) return true; // private
-  if (a === 192 && b === 168) return true; // private
-  if (a === 169 && b === 254) return true; // link-local incl. cloud metadata
-  if (a === 0) return true; // unspecified/this-network
+  return n;
+}
+
+function isDisallowedIpv4Int(n) {
+  return IPV4_BLOCKED.some(([net, bits]) => {
+    const size = 2 ** (32 - bits);
+    return Math.floor(n / size) === Math.floor(ipv4ToInt(net) / size);
+  });
+}
+
+// Eight 16-bit groups, or null if the text is not an IPv6 address.
+function ipv6Groups(ip) {
+  let s = String(ip).toLowerCase();
+  const zone = s.indexOf("%");
+  if (zone >= 0) s = s.slice(0, zone);
+  const lastColon = s.lastIndexOf(":");
+  if (lastColon < 0) return null;
+  const tail = s.slice(lastColon + 1);
+  if (tail.includes(".")) {
+    const n = ipv4ToInt(tail);
+    if (n === null) return null;
+    s = `${s.slice(0, lastColon + 1)}${(n >>> 16).toString(16)}:${(n & 0xffff).toString(16)}`;
+  }
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const rest = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const fill = 8 - head.length - rest.length;
+  if (halves.length === 1 ? fill !== 0 : fill < 1) return null;
+  const groups = [...head, ...Array(fill).fill("0"), ...rest];
+  if (!groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return null;
+  return groups.map((g) => parseInt(g, 16));
+}
+
+export function isDisallowedIp(ip) {
+  const kind = isIP(String(ip));
+  if (kind === 4) return isDisallowedIpv4Int(ipv4ToInt(ip));
+  if (kind !== 6) return true; // not an IP address: refuse
+  const g = ipv6Groups(ip);
+  if (!g) return true;
+  const embedded = () => isDisallowedIpv4Int(g[6] * 65536 + g[7]);
+  const zeroUpTo = (n) => g.slice(0, n).every((x) => x === 0);
+  if (zeroUpTo(5) && g[5] === 0xffff) return true; // IPv4-mapped ::ffff:0:0/96, whole prefix
+  if (zeroUpTo(6)) return true; // ::, ::1 and the deprecated IPv4-compatible ::/96
+  if (g[0] === 0x64 && g[1] === 0xff9b) { // NAT64: well-known /96 embeds IPv4, the rest is local-use
+    return g.slice(2, 6).every((x) => x === 0) ? embedded() : true;
+  }
+  if (g[0] === 0x2002) return isDisallowedIpv4Int(g[1] * 65536 + g[2]); // 6to4
+  if (g[0] === 0x2001 && g[1] === 0) return true; // Teredo
+  if ((g[0] & 0xffc0) === 0xfe80) return true; // link-local
+  if ((g[0] & 0xffc0) === 0xfec0) return true; // site-local (deprecated)
+  if ((g[0] & 0xfe00) === 0xfc00) return true; // unique local
+  if ((g[0] & 0xff00) === 0xff00) return true; // multicast
   return false;
 }
 
-export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch }) {
+// "scheme//host:effective-port" — URL.port is empty for the scheme's default port.
+function originKey(url) {
+  const port = url.port || (url.protocol === "https:" ? "443" : "80");
+  return `${url.protocol}//${url.hostname.toLowerCase()}:${port}`;
+}
+
+export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch, sourceLookup }) {
   const linkBase = (publicUrl || baseUrl || "").replace(/\/$/, "");
+  // Resolver for source_url hosts: (hostname) -> [{ address, family }]. Injectable for tests.
+  const resolveSourceHost = sourceLookup || ((hostname) => dnsLookup(hostname, { all: true, verbatim: true }));
+
+  // The configured XWiki origin (scheme, host, effective port) is the only source_url target
+  // whose resolved address is not IP-checked; other ports on that host are checked normally.
+  let trustedOrigin = "";
+  try {
+    const base = new URL(baseUrl);
+    if (base.protocol === "http:" || base.protocol === "https:") trustedOrigin = originKey(base);
+  } catch {
+    // no configured baseUrl to trust; every source_url host is IP-checked
+  }
 
   function viewUrl(pageFullName) {
     const segments = String(pageFullName || "").split(".").map(encodeURIComponent);
@@ -51,66 +121,124 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch })
     return `${linkBase}/bin/download/${segments.join("/")}/${encodeURIComponent(filename)}`;
   }
 
+  // Checks scheme and host of one hop. IP literals are checked here (Node does not call
+  // `lookup` for them); names are checked by the lookup at connect time.
+  function checkSourceTarget(url) {
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw new Error("source_url must use http or https");
+    }
+    // Node would turn userinfo into an Authorization: Basic header.
+    if (url.username || url.password) throw new Error("source_url must not contain credentials");
+    const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    if (!host) throw new Error("source_url has no host");
+    const trusted = trustedOrigin !== "" && originKey(url) === trustedOrigin;
+    if (!trusted && isIP(host) && isDisallowedIp(host)) throw new Error(DISALLOWED_ADDRESS);
+    return trusted;
+  }
+
+  // A net/dns-compatible lookup: resolves the name, refuses the connection if any address is
+  // disallowed, and hands exactly the checked addresses to the socket. The configured XWiki
+  // host (trusted) may resolve to a private address.
+  function checkingLookup(trusted) {
+    return (hostname, options, callback) => {
+      if (typeof options === "function") {
+        callback = options;
+        options = {};
+      }
+      const opts = typeof options === "number" ? { family: options } : options || {};
+      Promise.resolve()
+        .then(() => resolveSourceHost(hostname, { family: opts.family }))
+        .catch(() => {
+          throw new Error(`Could not resolve source_url host: ${hostname}`);
+        })
+        .then((resolved) => {
+          const addresses = (Array.isArray(resolved) ? resolved : [])
+            .map((a) => ({ address: a.address, family: a.family === 6 || isIP(a.address) === 6 ? 6 : 4 }));
+          if (addresses.length === 0) throw new Error(`Could not resolve source_url host: ${hostname}`);
+          if (!trusted && addresses.some((a) => isDisallowedIp(a.address))) throw new Error(DISALLOWED_ADDRESS);
+          const wanted = opts.family === 4 || opts.family === 6
+            ? addresses.filter((a) => a.family === opts.family)
+            : addresses;
+          if (wanted.length === 0) throw new Error(`Could not resolve source_url host: ${hostname}`);
+          return wanted;
+        })
+        .then(
+          (wanted) => process.nextTick(() => (opts.all
+            ? callback(null, wanted)
+            : callback(null, wanted[0].address, wanted[0].family))),
+          (err) => process.nextTick(() => callback(err)),
+        );
+    };
+  }
+
+  // One GET without redirect following and without any XWiki credentials.
+  function requestSourceOnce(url, trusted, signal) {
+    const mod = url.protocol === "https:" ? https : http;
+    return new Promise((resolve, reject) => {
+      const req = mod.request(url, {
+        method: "GET",
+        headers: { Accept: "*/*" },
+        lookup: checkingLookup(trusted),
+        agent: false,
+        signal,
+      }, resolve);
+      req.on("error", reject);
+      req.end();
+    });
+  }
+
+  async function readLimited(res) {
+    const declaredLength = Number(res.headers["content-length"]);
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_SOURCE_URL_BYTES) {
+      res.destroy();
+      throw new Error(TOO_LARGE);
+    }
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of res) {
+      total += chunk.length;
+      if (total > MAX_SOURCE_URL_BYTES) {
+        res.destroy();
+        throw new Error(TOO_LARGE);
+      }
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
+  }
+
   async function fetchFromSourceUrl(sourceUrl) {
-    let parsed;
+    let current;
     try {
-      parsed = new URL(sourceUrl);
+      current = new URL(sourceUrl);
     } catch {
       throw new Error("source_url is not a valid URL");
     }
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      throw new Error("source_url must use http or https");
-    }
-
-    let trustedHost = "";
+    const signal = AbortSignal.timeout(SOURCE_URL_TIMEOUT_MS);
     try {
-      trustedHost = new URL(baseUrl).hostname.toLowerCase();
-    } catch {
-      // no configured baseUrl to trust; fall through to the IP checks below
-    }
-
-    if (parsed.hostname.toLowerCase() !== trustedHost) {
-      let addresses;
-      try {
-        addresses = await lookup(parsed.hostname, { all: true });
-      } catch {
-        throw new Error(`Could not resolve source_url host: ${parsed.hostname}`);
-      }
-      if (addresses.length === 0 || addresses.some((addr) => isDisallowedIp(addr.address))) {
-        throw new Error("source_url resolves to a disallowed internal/private address");
-      }
-    }
-
-    const res = await fetcher(sourceUrl, { signal: AbortSignal.timeout(SOURCE_URL_TIMEOUT_MS) });
-    if (!res.ok) throw new Error(`Failed to fetch source_url: ${res.status}`);
-
-    const declaredLength = Number(res.headers.get("content-length"));
-    if (Number.isFinite(declaredLength) && declaredLength > MAX_SOURCE_URL_BYTES) {
-      throw new Error(`source_url content exceeds maximum allowed size (${MAX_SOURCE_URL_BYTES} bytes)`);
-    }
-
-    if (res.body && typeof res.body.getReader === "function") {
-      const reader = res.body.getReader();
-      const chunks = [];
-      let total = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        total += value.length;
-        if (total > MAX_SOURCE_URL_BYTES) {
-          reader.cancel().catch(() => {});
-          throw new Error(`source_url content exceeds maximum allowed size (${MAX_SOURCE_URL_BYTES} bytes)`);
+      for (let redirects = 0; ; redirects += 1) {
+        const trusted = checkSourceTarget(current);
+        const res = await requestSourceOnce(current, trusted, signal);
+        const status = res.statusCode;
+        if (REDIRECT_STATUSES.has(status) && res.headers.location) {
+          res.destroy();
+          if (redirects >= MAX_SOURCE_URL_REDIRECTS) throw new Error("source_url: too many redirects");
+          try {
+            current = new URL(res.headers.location, current);
+          } catch {
+            throw new Error("source_url redirect target is not a valid URL");
+          }
+          continue;
         }
-        chunks.push(value);
+        if (status < 200 || status >= 300) {
+          res.destroy();
+          throw new Error(`Failed to fetch source_url: ${status}`);
+        }
+        return await readLimited(res);
       }
-      return Buffer.concat(chunks);
+    } catch (err) {
+      if (signal.aborted) throw new Error("source_url request timed out");
+      throw err;
     }
-
-    const bytes = Buffer.from(await res.arrayBuffer());
-    if (bytes.length > MAX_SOURCE_URL_BYTES) {
-      throw new Error(`source_url content exceeds maximum allowed size (${MAX_SOURCE_URL_BYTES} bytes)`);
-    }
-    return bytes;
   }
 
   function normalizeHeadingName(value) {
@@ -227,7 +355,7 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch })
     if (
       optionsOrSessionCtx &&
       typeof optionsOrSessionCtx === "object" &&
-      ("xwikiCookie" in optionsOrSessionCtx || "userId" in optionsOrSessionCtx) &&
+      ("xwikiToken" in optionsOrSessionCtx || "userId" in optionsOrSessionCtx) &&
       (!sessionCtx || Object.keys(sessionCtx).length === 0)
     ) {
       return { options: {}, sessionCtx: optionsOrSessionCtx };
@@ -240,7 +368,7 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch })
     if (
       optionsOrSessionCtx &&
       typeof optionsOrSessionCtx === "object" &&
-      ("xwikiCookie" in optionsOrSessionCtx || "userId" in optionsOrSessionCtx) &&
+      ("xwikiToken" in optionsOrSessionCtx || "userId" in optionsOrSessionCtx) &&
       (!maybeSessionCtx || Object.keys(maybeSessionCtx).length === 0)
     ) {
       return {
@@ -291,26 +419,22 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch })
     };
   }
 
-  function cookieHeaders(sessionCtx) {
-    return sessionCtx?.xwikiCookie
-      ? { Cookie: sessionCtx.xwikiCookie, Accept: "application/json" }
-      : { Accept: "application/json" };
-  }
-
-  // Any authenticated request resets Tomcat's idle timer (30 min) for this session.
-  async function touchSession(sessionCtx) {
-    const res = await fetcher(`${baseUrl}/rest/`, { headers: cookieHeaders(sessionCtx) });
-    return res.status;
+  // Every XWiki request carries the user's bearer token. A missing token is a programming
+  // error, not an expired login: a plain Error, so the caller does not end the session.
+  function authHeaders(sessionCtx) {
+    const token = sessionCtx?.xwikiToken;
+    if (typeof token !== "string" || token === "") throw new Error("missing XWiki token");
+    return { Authorization: `Bearer ${token}`, Accept: "application/json" };
   }
 
   async function getFormToken(sessionCtx) {
-    const res = await fetcher(`${baseUrl}/rest/`, { headers: cookieHeaders(sessionCtx) });
+    const res = await fetcher(`${baseUrl}/rest/`, { headers: authHeaders(sessionCtx) });
     if (res.status === 401) throw new XWikiAuthError("XWiki session expired. Please re-authenticate.");
     return res.headers.get("XWiki-Form-Token") || "";
   }
 
   async function fetchPageRecord(pagePath, sessionCtx) {
-    const res = await fetcher(getPageEndpoint(pagePath), { headers: cookieHeaders(sessionCtx) });
+    const res = await fetcher(getPageEndpoint(pagePath), { headers: authHeaders(sessionCtx) });
     if (res.status === 401) throw new XWikiAuthError("XWiki session expired. Please re-authenticate.");
     if (res.status === 403) throw new Error("Access denied. Insufficient XWiki permissions.");
     if (!res.ok) throw new Error(`XWiki page fetch failed: ${res.status}`);
@@ -323,7 +447,7 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch })
     const formToken = await getFormToken(sessionCtx);
     const url = `${getPageEndpoint(pagePath)}/attachments/${encodeURIComponent(filename)}`;
     const headers = {
-      ...cookieHeaders(sessionCtx),
+      ...authHeaders(sessionCtx),
       "Content-Type": contentType || "application/octet-stream",
       ...(formToken ? { "XWiki-Form-Token": formToken } : {}),
     };
@@ -335,12 +459,10 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch })
   }
 
   return {
-    touchSession,
-
     async search(query, limitOrOptions = 10, optionsOrSessionCtx = {}, maybeSessionCtx = {}) {
       const { limit, options, sessionCtx } = resolveSearchArgs(limitOrOptions, optionsOrSessionCtx, maybeSessionCtx);
       const url = `${baseUrl}/rest/wikis/${wiki}/search?q=${encodeURIComponent(query)}&number=${limit}`;
-      const res = await fetcher(url, { headers: cookieHeaders(sessionCtx) });
+      const res = await fetcher(url, { headers: authHeaders(sessionCtx) });
       if (res.status === 401) throw new XWikiAuthError("XWiki session expired. Please re-authenticate.");
       if (!res.ok) throw new Error(`XWiki search failed: ${res.status}`);
       const data = await res.json();
@@ -390,7 +512,7 @@ export function createXWikiClient({ baseUrl, publicUrl, wiki, fetcher = fetch })
       const url = getPageEndpoint(pagePath);
       const xml = `<?xml version="1.0" encoding="UTF-8"?><page xmlns="http://www.xwiki.org"><title>${title}</title><syntax>${DEFAULT_SYNTAX}</syntax><content><![CDATA[${content}]]></content></page>`;
       const headers = {
-        ...cookieHeaders(sessionCtx),
+        ...authHeaders(sessionCtx),
         "Content-Type": "application/xml",
         ...(formToken ? { "XWiki-Form-Token": formToken } : {}),
       };

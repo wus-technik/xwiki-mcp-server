@@ -21,10 +21,24 @@ services:
       # Must include /mcp/ prefix — this URL goes through HAProxy
       - OAUTH_REDIRECT_URI=${OAUTH_REDIRECT_URI}
       - MCP_BASE_URL=${MCP_BASE_URL}
+      # Signs the access tokens (JWT); at least 32 bytes
       - SESSION_SECRET=${SESSION_SECRET}
-      # Keeps MCP logins across container recreates; the file holds XWiki session cookies
-      - SESSION_FILE=/data/sessions.json
+      # Persistent store (clients, consents, sessions, refresh families, cleanups) on the volume.
+      # Sessions survive container recreates. XWiki tokens and Authentik refresh tokens in it
+      # are encrypted with TOKEN_ENC_KEY.
+      - STORE_FILE=/data/store.json
+      # 32 random bytes, base64. Without it the server does not start, and the store file is
+      # unusable without the same key: keep it in the password manager.
+      - TOKEN_ENC_KEY=${TOKEN_ENC_KEY}
+      # Authentik groups allowed to use the MCP server (comma-separated)
+      - ALLOWED_GROUPS=${ALLOWED_GROUPS:-AdminsIT,xwiki_redaktion}
+      # Slug of the Authentik application (issuer <AUTHENTIK_ISSUER>/application/o/<slug>/)
+      - AUTHENTIK_APP_SLUG=${AUTHENTIK_APP_SLUG:-xwiki-mcp}
+      # Additional allowed redirect URIs / Origins for MCP clients (comma-separated, exact)
+      - EXTRA_REDIRECT_URIS=${EXTRA_REDIRECT_URIS:-}
+      - EXTRA_ORIGINS=${EXTRA_ORIGINS:-}
       - NODE_ENV=${NODE_ENV:-production}
+      - AUTH_DEBUG=${AUTH_DEBUG:-0}
       # Dev only — do NOT set to 0 in production
       # - NODE_TLS_REJECT_UNAUTHORIZED=0
     volumes:

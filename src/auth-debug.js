@@ -1,7 +1,8 @@
 function requestMeta(req = {}) {
   return {
     method: req.method,
-    path: req.originalUrl || req.url,
+    // Path only: the query string can carry secrets (access_token, code, state).
+    path: String(req.originalUrl || req.url || "").split("?")[0],
     userAgent: req.headers?.["user-agent"] || "",
   };
 }

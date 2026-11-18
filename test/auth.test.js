@@ -1,188 +1,191 @@
+// /mcp token check (Task 11): HS256 only, iss/aud = MCP_BASE_URL, exp required, known
+// session from the encrypted store, client_id bound to the session.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import request from "supertest";
 import express from "express";
-import { createOAuthRouter } from "../src/oauth.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { SignJWT, UnsecuredJWT } from "jose";
 import { createAuthMiddleware } from "../src/auth-middleware.js";
-import { createSession } from "../src/session-store.js";
 import { createApp } from "../src/app.js";
-import { getSession } from "../src/session-store.js";
-import { XWikiAuthError } from "../src/xwiki-client.js";
+import { openStore } from "../src/store.js";
+import { createSession } from "../src/sessions.js";
 
-function makeTestApp(overrides = {}) {
-  const app = express();
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: false }));
-  const router = createOAuthRouter({
-    mcpBaseUrl: "https://mcp.example.com",
-    authentikIssuer: "https://auth.example.com",
-    oauthClientId: "client_id",
-    oauthClientSecret: "client_secret",
-    oauthRedirectUri: "https://mcp.example.com/oauth/callback",
-    sessionSecret: "test-secret-32-chars-minimum-pad",
-    ...overrides,
+const KEY = Buffer.alloc(32, 7);
+const SECRET = "test-secret-32-chars-minimum-pad";
+const BASE = "https://xwiki.example.com/mcp";
+const CID = "client-1";
+
+async function setup() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "auth-"));
+  const store = openStore({ file: path.join(dir, "s.json"), key: KEY });
+  await store.mutate((s) => {
+    s.clients[CID] = { clientId: CID, clientName: "Claude", redirectUris: [], createdAt: 1, lastUsedAt: 1 };
   });
-  app.use(router);
+  const cfg = { mcpBaseUrl: BASE, sessionSecret: SECRET, authDebug: false };
+  const deps = { store, cfg, now: Date.now };
+  const { sid } = await createSession(deps, {
+    sub: "sub-1", userId: "alice", xwikiUser: "xwiki:XWiki.alice", clientId: CID,
+    authentikRefresh: "AK-RT", xwikiToken: "XW-TOKEN-1", consentId: "c-1", tokenExpiresAt: Date.now() + 1e9,
+  });
+  return { store, cfg, deps, sid };
+}
+
+function sign(claims, { iss = BASE, aud = BASE, exp = "1h", secret = SECRET } = {}) {
+  let jwt = new SignJWT(claims).setProtectedHeader({ alg: "HS256" }).setIssuedAt();
+  if (iss) jwt = jwt.setIssuer(iss);
+  if (aud) jwt = jwt.setAudience(aud);
+  if (exp !== null) jwt = jwt.setExpirationTime(exp);
+  return jwt.sign(new TextEncoder().encode(secret));
+}
+
+function protectedApp(deps) {
+  const app = express();
+  app.use(createAuthMiddleware(deps));
+  app.get("/protected", (req, res) => res.json(req.mcpSession));
   return app;
 }
 
-test("GET /.well-known/oauth-protected-resource returns resource metadata", async () => {
-  const app = makeTestApp();
-  const res = await request(app).get("/.well-known/oauth-protected-resource");
-  assert.equal(res.status, 200);
-  assert.equal(res.body.resource, "https://mcp.example.com");
-  assert.deepEqual(res.body.authorization_servers, ["https://mcp.example.com"]);
+function assertChallenge(res) {
+  assert.equal(res.status, 401);
+  const h = res.headers["www-authenticate"];
+  assert.ok(h, "WWW-Authenticate present");
+  assert.match(h, new RegExp(`resource_metadata="${BASE}/\\.well-known/oauth-protected-resource"`));
+  return h;
+}
+
+test("missing Authorization header → 401 with resource_metadata", async () => {
+  const { deps } = await setup();
+  assertChallenge(await request(protectedApp(deps)).get("/protected"));
 });
 
-test("GET /.well-known/oauth-authorization-server returns AS metadata", async () => {
-  const app = makeTestApp();
-  const res = await request(app).get("/.well-known/oauth-authorization-server");
-  assert.equal(res.status, 200);
-  assert.equal(res.body.authorization_endpoint, "https://mcp.example.com/oauth/authorize");
-  assert.equal(res.body.token_endpoint, "https://mcp.example.com/oauth/token");
-  assert.deepEqual(res.body.code_challenge_methods_supported, ["S256"]);
+test("empty Authorization header → 401 without error code", async () => {
+  const { deps } = await setup();
+  const h = assertChallenge(await request(protectedApp(deps)).get("/protected").set("Authorization", ""));
+  assert.doesNotMatch(h, /error=/);
 });
 
-test("GET /oauth/authorize with missing params returns 400", async () => {
-  const app = makeTestApp();
-  const res = await request(app).get("/oauth/authorize?response_type=code");
-  assert.equal(res.status, 400);
+test("missing Authorization header → challenge without error code", async () => {
+  const { deps } = await setup();
+  const h = assertChallenge(await request(protectedApp(deps)).get("/protected"));
+  assert.doesNotMatch(h, /error=/);
 });
 
-test("GET /oauth/authorize with valid params redirects to Authentik", async () => {
-  const app = makeTestApp();
-  const res = await request(app).get("/oauth/authorize").query({
-    response_type: "code",
-    client_id: "mcp-client",
-    redirect_uri: "http://localhost:9000/callback",
-    state: "client-state-123",
-    code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
-    code_challenge_method: "S256",
+test("scheme is case-insensitive: 'bearer <token>' is accepted", async () => {
+  const { deps, sid } = await setup();
+  const token = await sign({ sub: "sub-1", sid, client_id: CID, ver: 1 });
+  for (const scheme of ["bearer", "BEARER", "Bearer"]) {
+    const res = await request(protectedApp(deps)).get("/protected").set("Authorization", `${scheme} ${token}`);
+    assert.equal(res.status, 200, scheme);
+  }
+});
+
+for (const value of ["Basic dXNlcjpwYXNz", "Bearer", "Bearer ", "Bearer    ", "Token abc", "garbage"]) {
+  test(`present but unusable Authorization '${value}' → 401 invalid_token`, async () => {
+    const { deps } = await setup();
+    const res = await request(protectedApp(deps)).get("/protected").set("Authorization", value);
+    assert.match(assertChallenge(res), /error="invalid_token"/);
   });
-  assert.equal(res.status, 302);
-  assert.ok(res.headers.location.startsWith("https://auth.example.com/application/o/authorize/"));
-  const url = new URL(res.headers.location);
-  assert.equal(url.searchParams.get("response_type"), "code");
-  assert.equal(url.searchParams.get("client_id"), "client_id");
+}
+
+test("non-string sid claim → 401 invalid_token", async () => {
+  const { deps } = await setup();
+  for (const sid of [123, { a: 1 }, ["x"]]) {
+    const token = await sign({ sub: "sub-1", sid, client_id: CID, ver: 1 });
+    const res = await request(protectedApp(deps)).get("/protected").set("Authorization", `Bearer ${token}`);
+    assert.match(assertChallenge(res), /error="invalid_token"/);
+  }
 });
 
-test("auth middleware rejects missing Authorization header with 401", async () => {
-  const app = express();
-  app.use(createAuthMiddleware({ sessionSecret: "test-secret-32-chars-minimum-pad" }));
-  app.get("/protected", (req, res) => res.json({ userId: req.mcpSession.userId }));
-  const res = await request(app).get("/protected");
-  assert.equal(res.status, 401);
-  assert.ok(res.headers["www-authenticate"]);
+test("malformed token → 401 invalid_token", async () => {
+  const { deps } = await setup();
+  const res = await request(protectedApp(deps)).get("/protected").set("Authorization", "Bearer not-a-jwt");
+  assert.match(assertChallenge(res), /error="invalid_token"/);
 });
 
-test("auth middleware rejects malformed token with 401", async () => {
-  const app = express();
-  app.use(createAuthMiddleware({ sessionSecret: "test-secret-32-chars-minimum-pad" }));
-  app.get("/protected", (req, res) => res.json({ ok: true }));
-  const res = await request(app).get("/protected").set("Authorization", "Bearer not-a-jwt");
-  assert.equal(res.status, 401);
-});
-
-test("auth middleware attaches mcpSession for valid token", async () => {
-  const sessionId = createSession("alice", "XWIKI_SESSION=test");
-  const { SignJWT } = await import("jose");
-  const secret = new TextEncoder().encode("test-secret-32-chars-minimum-pad");
-  const token = await new SignJWT({ sub: "alice", sid: sessionId })
-    .setProtectedHeader({ alg: "HS256" })
-    .setExpirationTime("1h")
-    .setIssuedAt()
-    .sign(secret);
-
-  const app = express();
-  app.use(createAuthMiddleware({ sessionSecret: "test-secret-32-chars-minimum-pad" }));
-  app.get("/protected", (req, res) => res.json({ userId: req.mcpSession.userId, sessionId: req.mcpSession.sessionId }));
-  const res = await request(app).get("/protected").set("Authorization", `Bearer ${token}`);
+test("valid token → SessionCtx with decrypted XWiki token and tokenVersion", async () => {
+  const { deps, sid } = await setup();
+  const token = await sign({ sub: "sub-1", sid, client_id: CID, ver: 1 });
+  const res = await request(protectedApp(deps)).get("/protected").set("Authorization", `Bearer ${token}`);
   assert.equal(res.status, 200);
-  assert.equal(res.body.userId, "alice");
-  assert.equal(res.body.sessionId, sessionId);
+  assert.deepEqual(res.body, {
+    sessionId: sid, userId: "alice", xwikiUser: "xwiki:XWiki.alice", xwikiToken: "XW-TOKEN-1", tokenVersion: 1,
+  });
 });
 
-test("POST /mcp without auth returns 401 with WWW-Authenticate", async () => {
-  const app = createApp({ sessionSecret: "test-secret-32-chars-minimum-pad" });
-  const res = await request(app)
-    .post("/mcp")
-    .send({ jsonrpc: "2.0", method: "initialize", id: 1 });
-  assert.equal(res.status, 401);
-  assert.ok(res.headers["www-authenticate"]);
+for (const [name, opts] of [
+  ["wrong aud", { aud: "https://other.example.com/mcp" }],
+  ["wrong iss", { iss: "https://other.example.com/mcp" }],
+  ["missing aud", { aud: null }],
+  ["missing iss", { iss: null }],
+  ["expired", { exp: Math.floor(Date.now() / 1000) - 60 }],
+  ["no exp", { exp: null }],
+  ["wrong secret", { secret: "another-secret-32-chars-minimum-p" }],
+]) {
+  test(`token with ${name} → 401 with resource_metadata`, async () => {
+    const { deps, sid } = await setup();
+    const token = await sign({ sub: "sub-1", sid, client_id: CID, ver: 1 }, opts);
+    const res = await request(protectedApp(deps)).get("/protected").set("Authorization", `Bearer ${token}`);
+    assert.match(assertChallenge(res), /error="invalid_token"/);
+  });
+}
+
+test("alg none → 401 with resource_metadata", async () => {
+  const { deps, sid } = await setup();
+  const token = new UnsecuredJWT({ sub: "sub-1", sid, client_id: CID, ver: 1 })
+    .setIssuer(BASE).setAudience(BASE).setIssuedAt().setExpirationTime("1h").encode();
+  const res = await request(protectedApp(deps)).get("/protected").set("Authorization", `Bearer ${token}`);
+  assert.match(assertChallenge(res), /error="invalid_token"/);
 });
 
-test("POST /mcp tools/list with valid auth returns tool list", async () => {
-  const sessionId = createSession("bob", "XWIKI_SESSION=xyz");
-  const { SignJWT } = await import("jose");
-  const secret = new TextEncoder().encode("test-secret-32-chars-minimum-pad");
-  const token = await new SignJWT({ sub: "bob", sid: sessionId })
-    .setProtectedHeader({ alg: "HS256" })
-    .setExpirationTime("1h")
-    .setIssuedAt()
-    .sign(secret);
+test("HS512 token with the right secret → 401 (HS256 only)", async () => {
+  const { deps, sid } = await setup();
+  const token = await new SignJWT({ sub: "sub-1", sid, client_id: CID, ver: 1 })
+    .setProtectedHeader({ alg: "HS512" }).setIssuer(BASE).setAudience(BASE).setIssuedAt().setExpirationTime("1h")
+    .sign(new TextEncoder().encode(SECRET));
+  const res = await request(protectedApp(deps)).get("/protected").set("Authorization", `Bearer ${token}`);
+  assertChallenge(res);
+});
 
-  const mockClient = {
-    search: async () => [],
-    getPage: async () => ({ title: "", content: "", author: "", modified: "" }),
-    createPage: async () => "",
-  };
-  const app = createApp({ sessionSecret: "test-secret-32-chars-minimum-pad", xwikiClient: mockClient });
-  const res = await request(app)
-    .post("/mcp")
-    .set("Authorization", `Bearer ${token}`)
-    .send({ jsonrpc: "2.0", method: "tools/list", id: 2 });
+test("unknown session → 401", async () => {
+  const { deps } = await setup();
+  const token = await sign({ sub: "sub-1", sid: "no-such-session", client_id: CID, ver: 1 });
+  const res = await request(protectedApp(deps)).get("/protected").set("Authorization", `Bearer ${token}`);
+  assertChallenge(res);
+});
+
+test("missing sid claim → 401", async () => {
+  const { deps } = await setup();
+  const token = await sign({ sub: "sub-1", client_id: CID, ver: 1 });
+  const res = await request(protectedApp(deps)).get("/protected").set("Authorization", `Bearer ${token}`);
+  assertChallenge(res);
+});
+
+test("client_id not matching the session → 401", async () => {
+  const { deps, sid } = await setup();
+  const token = await sign({ sub: "sub-1", sid, client_id: "client-other", ver: 1 });
+  const res = await request(protectedApp(deps)).get("/protected").set("Authorization", `Bearer ${token}`);
+  assertChallenge(res);
+});
+
+test("token with an older ver than the session is accepted (outlives a renewal)", async () => {
+  const { deps, sid, store } = await setup();
+  await store.mutate((s) => {
+    s.sessions[sid].tokenVersion = 3;
+    s.sessions[sid].xwikiTokenSealed = store.sealField("XW-TOKEN-3", `session:${sid}:xwikiToken`);
+  });
+  const token = await sign({ sub: "sub-1", sid, client_id: CID, ver: 1 });
+  const res = await request(protectedApp(deps)).get("/protected").set("Authorization", `Bearer ${token}`);
   assert.equal(res.status, 200);
-  assert.equal(res.body.result.tools.length, 5);
+  assert.equal(res.body.tokenVersion, 3);
+  assert.equal(res.body.xwikiToken, "XW-TOKEN-3");
 });
 
-test("POST /mcp tools/call search_xwiki passes session context to xwiki client", async () => {
-  const sessionId = createSession("carol", "XWIKI_SESSION=abc");
-  const { SignJWT } = await import("jose");
-  const secret = new TextEncoder().encode("test-secret-32-chars-minimum-pad");
-  const token = await new SignJWT({ sub: "carol", sid: sessionId })
-    .setProtectedHeader({ alg: "HS256" })
-    .setExpirationTime("1h")
-    .setIssuedAt()
-    .sign(secret);
-
-  let capturedCtx;
-  const mockClient = {
-    search: async (query, limit, options, ctx) => { capturedCtx = ctx; return []; },
-    getPage: async () => ({}),
-    createPage: async () => "",
-  };
-  const app = createApp({ sessionSecret: "test-secret-32-chars-minimum-pad", xwikiClient: mockClient });
-  await request(app)
-    .post("/mcp")
-    .set("Authorization", `Bearer ${token}`)
-    .send({ jsonrpc: "2.0", method: "tools/call", params: { name: "search_xwiki", arguments: { query: "test" } }, id: 3 });
-  assert.equal(capturedCtx.userId, "carol");
-  assert.equal(capturedCtx.xwikiCookie, "XWIKI_SESSION=abc");
-});
-
-test("POST /mcp returns 401 and deletes session when XWiki session expires", async () => {
-  const sessionId = createSession("dan", "XWIKI_SESSION=expired");
-  const { SignJWT } = await import("jose");
-  const secret = new TextEncoder().encode("test-secret-32-chars-minimum-pad");
-  const token = await new SignJWT({ sub: "dan", sid: sessionId })
-    .setProtectedHeader({ alg: "HS256" })
-    .setExpirationTime("1h")
-    .setIssuedAt()
-    .sign(secret);
-
-  const mockClient = {
-    search: async () => { throw new XWikiAuthError("XWiki session expired"); },
-    getPage: async () => { throw new XWikiAuthError("XWiki session expired"); },
-    createPage: async () => { throw new XWikiAuthError("XWiki session expired"); },
-  };
-
-  const app = createApp({ sessionSecret: "test-secret-32-chars-minimum-pad", xwikiClient: mockClient });
-  const res = await request(app)
-    .post("/mcp")
-    .set("Authorization", `Bearer ${token}`)
-    .send({ jsonrpc: "2.0", method: "tools/call", params: { name: "search_xwiki", arguments: { query: "test" } }, id: 5 });
-
-  assert.equal(res.status, 401);
-  assert.ok(res.headers["www-authenticate"]);
-  assert.equal(getSession(sessionId), null);
+test("POST /mcp without auth through createApp → 401 with resource_metadata", async () => {
+  const { store } = await setup();
+  const app = createApp({ sessionSecret: SECRET, mcpBaseUrl: BASE, store, authDebug: false, xwikiClient: {} });
+  const res = await request(app).post("/mcp").send({ jsonrpc: "2.0", method: "initialize", id: 1 });
+  assertChallenge(res);
 });

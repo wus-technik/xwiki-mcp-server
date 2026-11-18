@@ -1,0 +1,103 @@
+<div id="userapplicationsPane" class="user-page-pane"><div>Auf dieser Seite können alle Token verwaltet werden, die von Anwendungen verwendet werden, um in ihrem Namen auf diese XWiki-Instanz zuzugreifen. Sie wurden über das OpenID Connect-Protokoll oder direkt auf dieser Seite erstellt (sofern dies zugelassen ist).</div><div class="wikimodel-emptyline"></div><form class="xform" method="post">
+<input name="form_token" type="hidden" value="REDACTED-FORM-TOKEN">
+
+<label id="label_application_name">
+Anwendung:
+<input id="input_application_name" name="application_name" type="text">
+</label>
+
+<label id="label_expiration">
+Ablauf:
+<select id="select_expiration" name="expiration">
+<option value="7">7 Tage</option>
+<option selected="selected" value="30">30 Tage</option>
+<option value="60">60 Tage</option>
+<option value="90">90 Tage</option>
+<option value="date">Benutzerdefiniert...</option>
+<option value="never">Niemals</option>
+</select>
+</label>
+
+<label id="label_expiration_date">
+Ablaufdatum:
+<input disabled="disabled" id="input_expiration_date" name="expiration_date" type="date" value="2026-12-17">
+</label>
+
+<button class="btn btn-primary" name="oidc_consent_create">Erstellen</button>
+</form>
+
+<div class="box">
+<div class="pull-left">
+<strong>local</strong>
+<br>
+<span class="date xHint">
+Der Token ist abgelaufen!
+</span>
+</div>
+
+<form class="xform pull-right" method="post">
+<input name="form_token" type="hidden" value="REDACTED-FORM-TOKEN">
+<input name="consent_id" type="hidden" value="xwiki:XWiki.mmuster^XWiki.OIDC.ConsentClass[0]">
+<button class="btn btn-sm btn-danger" name="oidc_consent_delete">Löschen</button>
+</form>
+</div>
+<div class="box">
+<div class="pull-left">
+<strong>token</strong>
+<br>
+<span class="date xHint">
+Der Token ist abgelaufen!
+</span>
+</div>
+
+<form class="xform pull-right" method="post">
+<input name="form_token" type="hidden" value="REDACTED-FORM-TOKEN">
+<input name="consent_id" type="hidden" value="xwiki:XWiki.mmuster^XWiki.OIDC.ConsentClass[1]">
+<button class="btn btn-sm btn-danger" name="oidc_consent_delete">Löschen</button>
+</form>
+</div>
+<div class="box">
+<div class="pull-left">
+<strong>token2</strong>
+<br>
+<span class="date xHint">
+Der Token ist abgelaufen!
+</span>
+</div>
+
+<form class="xform pull-right" method="post">
+<input name="form_token" type="hidden" value="REDACTED-FORM-TOKEN">
+<input name="consent_id" type="hidden" value="xwiki:XWiki.mmuster^XWiki.OIDC.ConsentClass[2]">
+<button class="btn btn-sm btn-danger" name="oidc_consent_delete">Löschen</button>
+</form>
+</div>
+<div class="box">
+<div class="pull-left">
+<strong>lab</strong>
+<br>
+<span class="date xHint">
+Der Token läuft am 10.12.2026 ab.
+</span>
+</div>
+
+<form class="xform pull-right" method="post">
+<input name="form_token" type="hidden" value="REDACTED-FORM-TOKEN">
+<input name="consent_id" type="hidden" value="xwiki:XWiki.mmuster^XWiki.OIDC.ConsentClass[3]">
+<button class="btn btn-sm btn-danger" name="oidc_consent_delete">Löschen</button>
+</form>
+</div>
+<div class="box">
+<div class="pull-left">
+<strong>lab2</strong>
+<br>
+<span class="date xHint">
+Der Token läuft am 10.12.2026 ab.
+</span>
+</div>
+
+<form class="xform pull-right" method="post">
+<input name="form_token" type="hidden" value="REDACTED-FORM-TOKEN">
+<input name="consent_id" type="hidden" value="xwiki:XWiki.mmuster^XWiki.OIDC.ConsentClass[4]">
+<button class="btn btn-sm btn-danger" name="oidc_consent_delete">Löschen</button>
+</form>
+</div></div>
